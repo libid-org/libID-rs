@@ -1,4 +1,4 @@
-# libid-rs
+# libID-rs
 
 Shared Rust crates for MPC-TLS / zkTLS infrastructure: run TLSNotary-style
 notarization sessions, carve selective-disclosure ranges out of TLS
@@ -23,7 +23,7 @@ crates with git dependencies. Consume it as a git dependency:
 
 ```toml
 [dependencies]
-libid-tlsn = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
+libid-tlsn = { git = "https://github.com/libid-org/libID-rs", tag = "v0.4.0" }
 ```
 
 The crate split exists precisely so this caveat stays contained: everything

@@ -7,7 +7,7 @@
 # refuses to publish any crate whose manifest names a git dependency, so this
 # crate stays git-only until upstream cuts a crates.io release matching the
 # pinned rev. Consumers (the notary repo) take it as
-#   libid-tlsn = { git = "https://github.com/libid-org/libid-rs", tag = "v<version>" }
+#   libid-tlsn = { git = "https://github.com/libid-org/libID-rs", tag = "v<version>" }
 #
 # Everything tlsn-free was deliberately pushed down into `libid-transcript`
 # (published) so this crate is ONLY the session driver.

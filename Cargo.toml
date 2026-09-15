@@ -15,7 +15,7 @@ edition = "2021"
 #   * the AWS SDK crates declare 1.94.1.
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/libid-org/libid-rs"
+repository = "https://github.com/libid-org/libID-rs"
 
 [workspace.dependencies]
 # Intra-workspace crates. Path + version so the publishable subset can be
