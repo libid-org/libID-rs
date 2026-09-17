@@ -75,6 +75,7 @@ pub use session::{
     prover_generic,
     root_store,
     verifier,
+    AbortOnDrop,
     CommitmentOpening,
     ProverResult,
     ProverStep,
