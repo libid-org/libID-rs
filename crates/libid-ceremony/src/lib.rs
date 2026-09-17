@@ -45,10 +45,13 @@
 //!   parsing bounds to the deployment, so the implementation states the route
 //!   and this crate states the records.
 
-pub mod attestation;
 pub mod token_exchange;
 
-pub use attestation::{
+/// The attested-data record now lives with the wire that carries it; these
+/// paths stay so a caller of this crate keeps compiling.
+pub use libid_transcript::attestation;
+
+pub use libid_transcript::{
     AttestedData,
     DirectionBlock,
     RangeCommitment,

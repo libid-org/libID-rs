@@ -14,17 +14,19 @@
 //! Each assertion below names the check it mirrors, so a rule that changes on
 //! chain has one place to change here.
 
-use libid_ceremony::attestation::{
-    AttestedData,
-    DirectionBlock,
-};
 use libid_tlsn::attest::{
     FromObserved,
     ObservedSession,
 };
-use libid_transcript::ceremony::{
-    profiles,
-    Layout,
+use libid_transcript::{
+    attestation::{
+        AttestedData,
+        DirectionBlock,
+    },
+    ceremony::{
+        profiles,
+        Layout,
+    },
 };
 use rangeset::set::RangeSet;
 use tlsn::{

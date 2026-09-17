@@ -3373,6 +3373,7 @@ dependencies = [
  "bincode 2.0.1",
  "hex",
  "libid-crypto",
+ "libid-transcript",
  "thiserror 2.0.20",
 ]
 
@@ -3420,7 +3421,6 @@ dependencies = [
  "http-body-util",
  "hyper 1.11.0",
  "hyper-util",
- "libid-ceremony",
  "libid-crypto",
  "libid-transcript",
  "rangeset",
@@ -3438,7 +3438,10 @@ dependencies = [
 name = "libid-transcript"
 version = "0.4.0"
 dependencies = [
+ "bincode 2.0.1",
+ "hex",
  "httparse",
+ "libid-crypto",
  "libid-identity",
  "libid-profiles",
  "serde",
