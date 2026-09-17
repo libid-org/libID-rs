@@ -1,0 +1,10 @@
+/Users/ai_agent/green/libid-rs/target-clean/debug/deps/aws_smithy_query-12f037b00ae99f11.d: /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/lib.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/codec/mod.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/codec/serializer.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/protocol.rs
+
+/Users/ai_agent/green/libid-rs/target-clean/debug/deps/libaws_smithy_query-12f037b00ae99f11.rlib: /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/lib.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/codec/mod.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/codec/serializer.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/protocol.rs
+
+/Users/ai_agent/green/libid-rs/target-clean/debug/deps/libaws_smithy_query-12f037b00ae99f11.rmeta: /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/lib.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/codec/mod.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/codec/serializer.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/protocol.rs
+
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/lib.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/codec/mod.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/codec/serializer.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-query-0.62.0/src/protocol.rs:

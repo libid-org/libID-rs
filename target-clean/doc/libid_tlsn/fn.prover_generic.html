@@ -1,0 +1,37 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Run the MPC-TLS prover with arbitrary API parameters."><title>prover_generic in libid_tlsn - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="libid_tlsn" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">prover_generic</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../libid_tlsn/index.html">libid_<wbr>tlsn</a><span class="version">0.3.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">prover_<wbr>generic</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#following-a-session" title="Following a session">Following a session</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="index.html">In crate libid_<wbr>tlsn</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="index.html">libid_tlsn</a></div><h1>Function <span class="fn">prover_<wbr>generic</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/libid_tlsn/session.rs.html#418-730">Source</a> </span></div><pre class="rust item-decl"><code>pub async fn prover_generic&lt;T, S, F&gt;(
+    socket: T,
+    request: <a class="struct" href="struct.HttpRequest.html" title="struct libid_tlsn::HttpRequest">Request</a>&lt;<a class="struct" href="struct.HttpBody.html" title="struct libid_tlsn::HttpBody">Full</a>&lt;<a class="struct" href="struct.Bytes.html" title="struct libid_tlsn::Bytes">Bytes</a>&gt;&gt;,
+    select_layout: S,
+    on_progress: F,
+) -&gt; <a class="type" href="type.Result.html" title="type libid_tlsn::Result">Result</a>&lt;<a class="struct" href="struct.ProverResult.html" title="struct libid_tlsn::ProverResult">ProverResult</a>&lt;T&gt;&gt;<div class="where">where
+    T: AsyncWrite + AsyncRead + <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/marker/trait.Unpin.html" title="trait core::marker::Unpin">Unpin</a> + 'static,
+    S: <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/ops/function/trait.FnOnce.html" title="trait core::ops::function::FnOnce">FnOnce</a>(&amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.u8.html">u8</a>], &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.u8.html">u8</a>]) -&gt; <a class="type" href="type.Result.html" title="type libid_tlsn::Result">Result</a>&lt;(<a class="struct" href="../libid_transcript/ceremony/struct.Layout.html" title="struct libid_transcript::ceremony::Layout">Layout</a>, <a class="struct" href="../libid_transcript/ceremony/struct.Layout.html" title="struct libid_transcript::ceremony::Layout">Layout</a>)&gt;,
+    F: <a class="trait" href="https://doc.rust-lang.org/1.97.1/core/ops/function/trait.Fn.html" title="trait core::ops::function::Fn">Fn</a>(<a class="enum" href="enum.ProverStep.html" title="enum libid_tlsn::ProverStep">ProverStep</a>),</div></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Run the MPC-TLS prover with arbitrary API parameters.</p>
+<p><code>select_layout</code> receives both complete transcripts once the HTTP exchange
+finishes and returns, for each direction, what to reveal and what to commit.
+The prover chooses that – it is the party holding the session keys, and
+nobody above it can decide on its behalf.</p>
+<p>A caller producing a ceremony attestation calls
+<code>libid_transcript::ceremony</code> here and returns what it gives back: those
+layouts derive each direction’s commitments as the complement of its
+reveals, so the direction tiles by construction, which is what the Platform
+Verifier’s coverage check demands. A caller doing something else – the
+JWKS session reads a public document and reveals all of it – states its
+own.</p>
+<p>Each revealed range becomes a separate Merkle leaf in the notary’s
+transcript tree. <a href="../libid_transcript/ranges/fn.compute_field_reveal_range.html" title="fn libid_transcript::ranges::compute_field_reveal_range"><code>libid_transcript::compute_field_reveal_range</code></a> and
+friends locate JSON field values in a response body.</p>
+<h2 id="following-a-session"><a class="doc-anchor" href="#following-a-session">§</a>Following a session</h2>
+<p>This is slow – setup and proving dominate – so every phase boundary is
+reported twice, to two different audiences. A <code>tracing</code> event inside this
+function’s span, for whoever reads the logs; and <a href="enum.ProverStep.html" title="enum libid_tlsn::ProverStep"><code>ProverStep</code></a> through
+<code>on_progress</code>, for a caller driving something typed off it.</p>
+<p>The browser has its own progress from the tlsn wasm prover and never
+reaches this function. The caller this exists for is a server that
+notarizes on someone’s behalf – the GitHub Token-Exchange Service, whose
+HTTP caller waits out the whole session – and which cannot report phases
+by parsing log lines.</p>
+<p>The request’s URI must be absolute – the host names the server – but the
+wire carries the request-target in origin-form (<code>GET /path?query HTTP/1.1</code>),
+which is the line every verifier pins. See [<code>origin_form</code>].</p>
+</div></details></section></div></main></body></html>
