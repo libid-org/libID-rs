@@ -4,7 +4,7 @@
 //! EIP-191 signing and recovery -- the pair a notary signature is made and
 //! checked with -- and address helpers. Nothing in this
 //! crate knows about any specific contract ABI — the byte layouts a Solidity
-//! decoder has to agree with live in `libid-ceremony`.
+//! decoder has to agree with live in `libid-transcript`.
 
 use k256::ecdsa::{
     signature::hazmat::PrehashSigner,
