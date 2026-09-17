@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BEARER_OPENING_LEN","CODE_VERIFIER_LEN","MAX_ACCESS_TOKEN_BYTES","MAX_ATTESTED_DATA_BYTES","MAX_CODE_BYTES","MAX_RESPONSE_BYTES","SIGNATURE_LEN"],"enum":["TokenExchangeError"],"struct":["TokenAttestation","TokenRequest","TokenResponse"]};

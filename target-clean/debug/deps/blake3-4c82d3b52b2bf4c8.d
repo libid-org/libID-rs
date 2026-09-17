@@ -1,0 +1,12 @@
+/Users/ai_agent/green/libid-rs/target-clean/debug/deps/blake3-4c82d3b52b2bf4c8.d: /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/lib.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/guts.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/hazmat.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/platform.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/ffi_neon.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/portable.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/io.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/join.rs
+
+/Users/ai_agent/green/libid-rs/target-clean/debug/deps/libblake3-4c82d3b52b2bf4c8.rmeta: /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/lib.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/guts.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/hazmat.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/platform.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/ffi_neon.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/portable.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/io.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/join.rs
+
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/lib.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/guts.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/hazmat.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/platform.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/ffi_neon.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/portable.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/io.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/blake3-1.8.6/src/join.rs:

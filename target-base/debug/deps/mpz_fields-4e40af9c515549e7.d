@@ -1,0 +1,13 @@
+/Users/ai_agent/green/libid-rs/target-base/debug/deps/mpz_fields-4e40af9c515549e7.d: /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/lib.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2_128.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2_64.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/p256.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/bmul.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/spread.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2_128/soft.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2_64/soft.rs
+
+/Users/ai_agent/green/libid-rs/target-base/debug/deps/libmpz_fields-4e40af9c515549e7.rmeta: /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/lib.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2_128.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2_64.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/p256.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/bmul.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/spread.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2_128/soft.rs /Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2_64/soft.rs
+
+/Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/lib.rs:
+/Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2.rs:
+/Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2_128.rs:
+/Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2_64.rs:
+/Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/p256.rs:
+/Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/bmul.rs:
+/Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/spread.rs:
+/Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2_128/soft.rs:
+/Users/ai_agent/.cargo/git/checkouts/mpz-ff613164c8c25a96/6ebfe61/crates/fields/src/gf2_64/soft.rs:

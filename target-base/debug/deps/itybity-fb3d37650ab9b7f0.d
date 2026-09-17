@@ -1,0 +1,12 @@
+/Users/ai_agent/green/libid-rs/target-base/debug/deps/itybity-fb3d37650ab9b7f0.d: /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/lib.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/alloc.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/array.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/bool.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/slice.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/str.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/traits.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/uint.rs
+
+/Users/ai_agent/green/libid-rs/target-base/debug/deps/libitybity-fb3d37650ab9b7f0.rmeta: /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/lib.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/alloc.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/array.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/bool.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/slice.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/str.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/traits.rs /Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/uint.rs
+
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/lib.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/alloc.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/array.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/bool.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/slice.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/str.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/traits.rs:
+/Users/ai_agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itybity-0.2.1/src/uint.rs:
