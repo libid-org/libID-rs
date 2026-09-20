@@ -46,6 +46,8 @@ pub enum LayoutError {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TokenBodyError {
     #[error("the profile's body names `{0}`, which the caller has no value for")]
+    MissingField(String),
+    #[error("the caller names `{0}`, which the profile's body does not take")]
     UnknownField(String),
     #[error("the value of `{0}` is empty, and the verifier refuses an empty field")]
     EmptyField(String),
@@ -82,16 +84,24 @@ pub fn form_encode(value: &str) -> String {
 /// `session.token_fields` in order, each as `name=value` with the value
 /// form-encoded, `&` between pairs and nothing after the last.
 ///
-/// `values` holds each field's value by name, decoded. A name the profile
-/// does not list is ignored, and `grant_type` is always
-/// [`AUTHORIZATION_CODE_GRANT`]. A name the profile lists and `values` lacks
-/// is an error rather than a field left out, because the verifier compares
-/// the field list whole and a body missing one verifies nowhere. An empty
-/// value is refused for the same reason.
+/// `values` holds each field's value by name, decoded, and `grant_type` is
+/// always [`AUTHORIZATION_CODE_GRANT`]. The two lists must agree: a name the
+/// profile lists and `values` lacks is an error rather than a field left out,
+/// because the verifier compares the field list whole and a body missing one
+/// verifies nowhere; a name `values` carries and the profile does not list --
+/// or `grant_type`, which no caller chooses -- is an error rather than a
+/// value dropped, because a caller that named it meant it to be sent. An
+/// empty value is refused for the first reason.
 pub fn token_body(
     session: &TokenSession,
     values: &[(&str, &str)],
 ) -> Result<String, TokenBodyError> {
+    if let Some((name, _)) = values
+        .iter()
+        .find(|(name, _)| *name == "grant_type" || !session.token_fields.contains(name))
+    {
+        return Err(TokenBodyError::UnknownField(name.to_string()));
+    }
     let mut body = String::new();
     for (index, name) in session.token_fields.iter().enumerate() {
         let value = match *name {
@@ -100,7 +110,7 @@ pub fn token_body(
                 .iter()
                 .find(|(field, _)| field == name)
                 .map(|(_, value)| *value)
-                .ok_or_else(|| TokenBodyError::UnknownField(name.to_string()))?,
+                .ok_or_else(|| TokenBodyError::MissingField(name.to_string()))?,
         };
         if value.is_empty() {
             return Err(TokenBodyError::EmptyField(name.to_string()));
@@ -521,7 +531,6 @@ mod tests {
                 ("code", "abc123"),
                 ("redirect_uri", "https://app.example/cb"),
                 ("code_verifier", "xyz~"),
-                ("client_secret", "never read"),
             ],
         )
         .unwrap();
@@ -554,11 +563,38 @@ mod tests {
     fn a_field_the_caller_cannot_answer_is_an_error() {
         assert_eq!(
             token_body(&github_token(), &[("client_id", "Iv1.x")]),
-            Err(TokenBodyError::UnknownField("code".into()))
+            Err(TokenBodyError::MissingField("code".into()))
         );
         assert_eq!(
             token_body(&x_token(), &[("client_id", "")]),
             Err(TokenBodyError::EmptyField("client_id".into()))
+        );
+    }
+
+    #[test]
+    fn a_field_the_profile_does_not_take_is_an_error() {
+        let x = [
+            ("client_id", "myClient-1"),
+            ("code", "abc123"),
+            ("redirect_uri", "https://app.example/cb"),
+            ("code_verifier", "xyz"),
+        ];
+        let with = |extra| {
+            let mut values = x.to_vec();
+            values.push(extra);
+            token_body(&x_token(), &values)
+        };
+        assert_eq!(
+            with(("client_secret", "never sent")),
+            Err(TokenBodyError::UnknownField("client_secret".into()))
+        );
+        assert_eq!(
+            with(("grant_type", "client_credentials")),
+            Err(TokenBodyError::UnknownField("grant_type".into()))
+        );
+        assert_eq!(
+            with(("code_verifer", "typo")),
+            Err(TokenBodyError::UnknownField("code_verifer".into()))
         );
     }
 
