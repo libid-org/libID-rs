@@ -8,22 +8,30 @@
 //! same Authorization Digest the suites derive, which is what binds the
 //! platform's token to that submission.
 //!
-//! You supply the app and the consent: register `http://127.0.0.1:8787/callback`
-//! (or whatever `--listen` names) as a redirect URI on the app, run this,
-//! open the URL it prints, log in, consent. It receives the code, runs the
-//! token session and then the identity session, and writes
-//! `<platform>-ceremony-real.json` beside the generated fixture. The bearer,
-//! the secret and the code are never written: the record commits the first
-//! two and the third is spent.
+//! You supply the app and the consent: register the redirect URI below on the
+//! app, run this, open the URL it prints, log in, consent. It receives the
+//! code, runs the token session and then the identity session, and writes
+//! `<platform>-ceremony-real.json` beside the generated fixture. The bearer is
+//! never written: the record commits it. The request is revealed whole,
+//! credential included, so the file is a public record of a public credential;
+//! the code in it is spent.
+//!
+//! ONE REDIRECT URI SERVES EVERY PLATFORM: `http://127.0.0.1:8722/auth/callback`,
+//! the default here and the path the bridge serves. A path naming its platform
+//! would mean one app registration per platform to capture from, for a value
+//! no ceremony reads -- the profile fixes what the redirect URI must equal, not
+//! what it must be.
 //!
 //! ```sh
 //! cargo run -p libid-tlsn --example capture_ceremony -- \
-//!     --platform github --client-id ID --client-secret SECRET \
-//!     --redirect-uri http://127.0.0.1:8787/callback --out <dir>
+//!     --platform github --client-id ID --client-secret SECRET --out <dir>
 //! cargo run -p libid-tlsn --example capture_ceremony -- \
-//!     --platform x --client-id ID \
-//!     --redirect-uri http://127.0.0.1:8787/callback --out <dir>
+//!     --platform x --client-id ID --out <dir>
 //! ```
+//!
+//! `--redirect-uri` and `--listen` override the pair for an app registered
+//! elsewhere; they move together, since the code arrives on the address the
+//! platform redirects to.
 //!
 //! `RUST_LOG=info` shows the session phases. Each session takes the time
 //! MPC-TLS takes, tens of seconds.
@@ -58,7 +66,9 @@ use libid_tlsn::{
 use libid_transcript::{
     attestation::AttestedData,
     ceremony::{
+        form_encode,
         profiles,
+        token_body,
         Layout,
     },
 };
@@ -71,6 +81,12 @@ use tokio::{
     },
     net::TcpListener,
 };
+
+/// The redirect URI every platform's app registers, and the address the code
+/// comes back on. One pair, so one app registration per platform is enough to
+/// capture from and the two cannot drift apart.
+const DEFAULT_REDIRECT_URI: &str = "http://127.0.0.1:8722/auth/callback";
+const DEFAULT_LISTEN: &str = "127.0.0.1:8722";
 
 struct Args {
     platform: String,
@@ -85,8 +101,8 @@ fn args() -> Args {
     let mut platform = None;
     let mut client_id = None;
     let mut client_secret = None;
-    let mut redirect_uri = None;
-    let mut listen = "127.0.0.1:8787".to_owned();
+    let mut redirect_uri = DEFAULT_REDIRECT_URI.to_owned();
+    let mut listen = DEFAULT_LISTEN.to_owned();
     let mut out = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -95,7 +111,7 @@ fn args() -> Args {
             "--platform" => platform = Some(value()),
             "--client-id" => client_id = Some(value()),
             "--client-secret" => client_secret = Some(value()),
-            "--redirect-uri" => redirect_uri = Some(value()),
+            "--redirect-uri" => redirect_uri = value(),
             "--listen" => listen = value(),
             "--out" => out = Some(PathBuf::from(value())),
             other => panic!("unknown flag {other}"),
@@ -105,25 +121,10 @@ fn args() -> Args {
         platform: platform.expect("--platform x|github"),
         client_id: client_id.expect("--client-id"),
         client_secret,
-        redirect_uri: redirect_uri.expect("--redirect-uri"),
+        redirect_uri,
         listen,
         out: out.expect("--out <dir>"),
     }
-}
-
-/// `application/x-www-form-urlencoded` and URL query encoding of one value,
-/// as `URLSearchParams` spells it: unreserved bytes as they are, the rest
-/// percent-encoded.
-fn form_encode(value: &str) -> String {
-    let mut out = String::new();
-    for b in value.bytes() {
-        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 fn form_decode(value: &str) -> String {
@@ -353,12 +354,16 @@ async fn main() {
     let (token, identity) = match args.platform.as_str() {
         "x" => {
             let profile = profiles::X;
-            let body = format!(
-                "grant_type=authorization_code&client_id={}&code={}&redirect_uri={}&code_verifier={verifier}",
-                form_encode(&args.client_id),
-                form_encode(&code),
-                form_encode(&args.redirect_uri),
-            );
+            let body = token_body(
+                &profile.token.unwrap(),
+                &[
+                    ("client_id", &args.client_id),
+                    ("code", &code),
+                    ("redirect_uri", &args.redirect_uri),
+                    ("code_verifier", &verifier),
+                ],
+            )
+            .unwrap_or_else(|e| fail(e.to_string()));
             // As the browser's `buildTokenRequest` sets them.
             let token = notarize(
                 request(
@@ -374,10 +379,7 @@ async fn main() {
                     body.as_bytes(),
                 ),
                 |sent, recv| {
-                    Ok((
-                        Layout::token_request(sent, &profile.token.unwrap())?,
-                        Layout::token_response(recv)?,
-                    ))
+                    Ok((Layout::token_request(sent), Layout::token_response(recv)?))
                 },
                 &sign,
             )
@@ -418,14 +420,19 @@ async fn main() {
                 .client_secret
                 .as_deref()
                 .expect("--client-secret for github");
-            let body = format!(
-                "client_id={}&code={}&redirect_uri={}&code_verifier={verifier}&client_secret={}",
-                form_encode(&args.client_id),
-                form_encode(&code),
-                form_encode(&args.redirect_uri),
-                form_encode(secret),
-            );
-            // As the Token-Exchange Service sets them; hyper appends the length.
+            let body = token_body(
+                &profile.token.unwrap(),
+                &[
+                    ("client_id", &args.client_id),
+                    ("code", &code),
+                    ("redirect_uri", &args.redirect_uri),
+                    ("code_verifier", &verifier),
+                    ("client_secret", secret),
+                ],
+            )
+            .unwrap_or_else(|e| fail(e.to_string()));
+            // The body is the profile's `token_fields` in order; hyper appends
+            // the length.
             let token = notarize(
                 request(
                     "POST",
@@ -439,10 +446,7 @@ async fn main() {
                     body.as_bytes(),
                 ),
                 |sent, recv| {
-                    Ok((
-                        Layout::token_request(sent, &profile.token.unwrap())?,
-                        Layout::token_response(recv)?,
-                    ))
+                    Ok((Layout::token_request(sent), Layout::token_response(recv)?))
                 },
                 &sign,
             )

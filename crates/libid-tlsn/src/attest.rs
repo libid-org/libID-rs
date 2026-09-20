@@ -638,11 +638,11 @@ mod tests {
         let sent: &[u8] = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\n\r\ngrant_type=authorization_code&client_id=abc&code_verifier=xyz";
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"access_token\":\"SECRETBEARER\"}";
 
-        let s = Layout::token_request(sent, &profiles::X.token.unwrap()).unwrap();
+        let s = Layout::token_request(sent);
         let r = Layout::token_response(recv).unwrap();
         let data = round_trip(sent, recv, &s, &r);
         assert_tiles(&data.sent, data.sent_transcript_length);
-        // X reveals its token request whole, so the verifier can see the head
+        // The token request is revealed whole, so the verifier can see the head
         // boundary and locate the body by the framing the server parsed.
         assert!(data.sent.commitments.is_empty());
         assert_eq!(data.sent.revealed.len(), 1);
@@ -650,17 +650,20 @@ mod tests {
     }
 
     #[test]
-    fn the_github_exchange_layout_commits_a_suffix() {
+    fn the_github_exchange_layout_reveals_the_credential() {
         let sent: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\n\r\nclient_id=Iv1.x&code=abc&code_verifier=xyz&client_secret=deadbeef";
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"access_token\":\"gho_SECRET\"}";
 
-        let s = Layout::token_request(sent, &profiles::GITHUB.token.unwrap()).unwrap();
+        let s = Layout::token_request(sent);
         let r = Layout::token_response(recv).unwrap();
         let data = round_trip(sent, recv, &s, &r);
         assert_tiles(&data.sent, data.sent_transcript_length);
         assert_eq!(data.sent.revealed.len(), 1);
-        assert_eq!(data.sent.commitments.len(), 1);
-        // Ordered last, so the commitment reaches the transcript end.
-        assert_eq!(data.sent.commitments[0].end, data.sent_transcript_length);
+        assert!(data.sent.commitments.is_empty());
+        // `client_secret` is a public credential: the verifier reads it.
+        assert!(data.sent.revealed[0]
+            .bytes
+            .windows(8)
+            .any(|w| w == b"deadbeef"));
     }
 }

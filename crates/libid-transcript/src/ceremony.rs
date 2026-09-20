@@ -13,9 +13,7 @@
 //!
 //! Nothing here is applied on anyone's behalf. A prover notarizing a ceremony
 //! session calls these and hands the result to `prover_generic`; a prover doing
-//! something else states its own. In Rust that prover will be the GitHub
-//! Token-Exchange Service, for the token session. The other three sessions are
-//! the browser's.
+//! something else states its own.
 
 use std::ops::Range;
 
@@ -42,8 +40,89 @@ pub enum LayoutError {
     MissingField(String),
     #[error("the transcript has no head boundary, so its body cannot be located")]
     NoHeadBoundary,
-    #[error("the credential to commit was not found in the request body")]
-    MissingCredential,
+}
+
+/// Why a token body could not be serialized from a profile's field list.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TokenBodyError {
+    #[error("the profile's body names `{0}`, which the caller has no value for")]
+    MissingField(String),
+    #[error("the caller names `{0}`, which the profile's body does not take")]
+    UnknownField(String),
+    #[error("the value of `{0}` is empty, and the verifier refuses an empty field")]
+    EmptyField(String),
+}
+
+/// The value of `grant_type` on every token request: RFC 6749 section 4.1.3
+/// fixes it, so no profile and no caller chooses it.
+pub const AUTHORIZATION_CODE_GRANT: &str = "authorization_code";
+
+/// One value as the `application/x-www-form-urlencoded` serializer spells it
+/// (WHATWG URL, section 5.2): `[A-Za-z0-9*._-]` as they are, a space as `+`,
+/// every other byte as `%XX` with uppercase digits.
+///
+/// This is the alphabet the on-chain verifiers hold every token body value to,
+/// and the one `URLSearchParams` emits in the browser -- so a body built here
+/// and one built there are the same bytes. It is NOT RFC 3986's unreserved
+/// set: `~` is escaped and `*` is not, and a body spelled the other way is a
+/// body the verifier refuses.
+pub fn form_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        match b {
+            b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'*' | b'-' | b'.' | b'_' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// The token request body a profile's verifier holds the request to:
+/// `session.token_fields` in order, each as `name=value` with the value
+/// form-encoded, `&` between pairs and nothing after the last.
+///
+/// `values` holds each field's value by name, decoded, and `grant_type` is
+/// always [`AUTHORIZATION_CODE_GRANT`]. The two lists must agree: a name the
+/// profile lists and `values` lacks is an error rather than a field left out,
+/// because the verifier compares the field list whole and a body missing one
+/// verifies nowhere; a name `values` carries and the profile does not list --
+/// or `grant_type`, which no caller chooses -- is an error rather than a
+/// value dropped, because a caller that named it meant it to be sent. An
+/// empty value is refused for the first reason.
+pub fn token_body(
+    session: &TokenSession,
+    values: &[(&str, &str)],
+) -> Result<String, TokenBodyError> {
+    if let Some((name, _)) = values
+        .iter()
+        .find(|(name, _)| *name == "grant_type" || !session.token_fields.contains(name))
+    {
+        return Err(TokenBodyError::UnknownField(name.to_string()));
+    }
+    let mut body = String::new();
+    for (index, name) in session.token_fields.iter().enumerate() {
+        let value = match *name {
+            "grant_type" => AUTHORIZATION_CODE_GRANT,
+            _ => values
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| *value)
+                .ok_or_else(|| TokenBodyError::MissingField(name.to_string()))?,
+        };
+        if value.is_empty() {
+            return Err(TokenBodyError::EmptyField(name.to_string()));
+        }
+        if index > 0 {
+            body.push('&');
+        }
+        body.push_str(name);
+        body.push('=');
+        body.push_str(&form_encode(value));
+    }
+    Ok(body)
 }
 
 /// The bytes of `[0, len)` that `reveal` does not cover.
@@ -128,29 +207,16 @@ impl Layout {
         Layout { reveal, commit }
     }
 
-    /// The token request of `x/v1`, or the token exchange of `github/v1`.
+    /// The token request, revealed whole.
     ///
-    /// X reveals the request whole: it authenticates with a public client, so the
-    /// request carries nothing secret and the head boundary stays visible, which is
-    /// how the verifier locates the body at all. GitHub commits its `client_secret`
-    /// alone -- ordered last in the body, so the revealed run is a prefix and the
-    /// commitment reaches the transcript end.
-    pub fn token_request(
-        sent: &[u8],
-        session: &TokenSession,
-    ) -> Result<Self, LayoutError> {
-        let Some(field) = session.secret_field else {
-            return Ok(Self::revealing(core::iter::once(0..sent.len()), sent.len()));
-        };
-
-        // `&client_secret=` begins the committed tail. The profile orders it last
-        // under REQ-COMMON-22 precisely so this is a suffix and not a hole.
-        let needle = format!("&{field}=");
-        let start = sent
-            .windows(needle.len())
-            .position(|w| w == needle.as_bytes())
-            .ok_or(LayoutError::MissingCredential)?;
-        Ok(Self::revealing(core::iter::once(0..start), sent.len()))
+    /// No launch profile hides a body field: X authenticates with a public
+    /// client, and the credential GitHub calls `client_secret` is a public
+    /// credential its verifier reads. So the request is one revealed run from
+    /// the request line to the last body byte, and the verifier holds the body
+    /// it reads there to the profile's `token_fields` -- exactly those names in
+    /// that order, one nonempty value each (see [`token_body`]).
+    pub fn token_request(sent: &[u8]) -> Self {
+        Self::revealing(core::iter::once(0..sent.len()), sent.len())
     }
 
     /// The token response: the `"access_token":"` delimiter and its closing quote
@@ -164,8 +230,7 @@ impl Layout {
         // RFC 6749 section 5.1, not a platform's choice -- which is why the
         // contract pins `ACCESS_TOKEN_PREFIX` on `TlsNotaryVerifierBase`, shared by
         // every profile, while the things that ARE platform choices are per-profile
-        // virtuals there and parameters here: the committed body credential of
-        // `Layout::token_request`, the field names of
+        // virtuals there and parameters here: the field names of
         // `Layout::identity_response`.
         const FIELD: &str = "access_token";
         let missing = || LayoutError::MissingField(FIELD.into());
@@ -429,31 +494,107 @@ mod tests {
 
     #[test]
     fn the_x_token_request_is_revealed_whole() {
-        let l = Layout::token_request(X_TOKEN_REQ, &x_token()).unwrap();
+        let l = Layout::token_request(X_TOKEN_REQ);
         assert_eq!(l.reveal, vec![0..X_TOKEN_REQ.len()]);
         assert!(l.commit.is_empty(), "X hides nothing in its token request");
         assert!(tiles(&l, X_TOKEN_REQ.len()));
     }
 
     #[test]
-    fn the_github_exchange_commits_only_its_secret() {
+    fn the_github_exchange_is_revealed_whole() {
         let req: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\n\r\nclient_id=Iv1.x&code=abc&code_verifier=xyz&client_secret=deadbeef";
-        let l = Layout::token_request(req, &github_token()).unwrap();
-        assert_eq!(l.reveal.len(), 1);
-        assert_eq!(l.commit.len(), 1);
-        // The commitment is a suffix, which is why ordering it last matters.
-        assert_eq!(l.commit[0].end, req.len());
+        let l = Layout::token_request(req);
+        assert_eq!(l.reveal, vec![0..req.len()]);
+        assert!(l.commit.is_empty(), "the credential is public and revealed");
         assert!(tiles(&l, req.len()));
-        // The secret's bytes are inside the commitment, not the reveal.
         let revealed = &req[l.reveal[0].clone()];
-        assert!(!revealed.windows(8).any(|w| w == b"deadbeef"));
+        assert!(revealed.windows(8).any(|w| w == b"deadbeef"));
     }
 
     #[test]
-    fn a_missing_secret_is_an_error_not_a_silent_reveal() {
+    fn form_encode_spells_the_whatwg_alphabet() {
+        assert_eq!(form_encode("aZ09*-._"), "aZ09*-._");
+        assert_eq!(form_encode("a b"), "a+b");
+        assert_eq!(form_encode("~/?&=%"), "%7E%2F%3F%26%3D%25");
         assert_eq!(
-            Layout::token_request(X_TOKEN_REQ, &github_token()),
-            Err(LayoutError::MissingCredential)
+            form_encode("https://app.example/cb"),
+            "https%3A%2F%2Fapp.example%2Fcb"
+        );
+    }
+
+    #[test]
+    fn the_x_token_body_is_the_profile_fields_in_order() {
+        let body = token_body(
+            &x_token(),
+            &[
+                ("client_id", "myClient-1"),
+                ("code", "abc123"),
+                ("redirect_uri", "https://app.example/cb"),
+                ("code_verifier", "xyz~"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            body,
+            "grant_type=authorization_code&client_id=myClient-1&code=abc123&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier=xyz%7E"
+        );
+    }
+
+    #[test]
+    fn the_github_token_body_is_the_profile_fields_in_order() {
+        let body = token_body(
+            &github_token(),
+            &[
+                ("client_id", "Iv1.x"),
+                ("code", "abc"),
+                ("redirect_uri", "https://app.example/cb"),
+                ("code_verifier", "xyz"),
+                ("client_secret", "dead beef"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            body,
+            "client_id=Iv1.x&code=abc&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier=xyz&client_secret=dead+beef"
+        );
+    }
+
+    #[test]
+    fn a_field_the_caller_cannot_answer_is_an_error() {
+        assert_eq!(
+            token_body(&github_token(), &[("client_id", "Iv1.x")]),
+            Err(TokenBodyError::MissingField("code".into()))
+        );
+        assert_eq!(
+            token_body(&x_token(), &[("client_id", "")]),
+            Err(TokenBodyError::EmptyField("client_id".into()))
+        );
+    }
+
+    #[test]
+    fn a_field_the_profile_does_not_take_is_an_error() {
+        let x = [
+            ("client_id", "myClient-1"),
+            ("code", "abc123"),
+            ("redirect_uri", "https://app.example/cb"),
+            ("code_verifier", "xyz"),
+        ];
+        let with = |extra| {
+            let mut values = x.to_vec();
+            values.push(extra);
+            token_body(&x_token(), &values)
+        };
+        assert_eq!(
+            with(("client_secret", "never sent")),
+            Err(TokenBodyError::UnknownField("client_secret".into()))
+        );
+        assert_eq!(
+            with(("grant_type", "client_credentials")),
+            Err(TokenBodyError::UnknownField("grant_type".into()))
+        );
+        assert_eq!(
+            with(("code_verifer", "typo")),
+            Err(TokenBodyError::UnknownField("code_verifer".into()))
         );
     }
 
