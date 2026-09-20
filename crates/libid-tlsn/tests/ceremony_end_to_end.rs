@@ -137,7 +137,7 @@ fn count(haystack: &[u8], needle: &[u8]) -> usize {
 
 #[test]
 fn the_token_session_produces_a_record_the_verifier_accepts() {
-    let sl = Layout::token_request(TOKEN_SENT, &profiles::X.token.unwrap()).unwrap();
+    let sl = Layout::token_request(TOKEN_SENT);
     let rl = Layout::token_response(TOKEN_RECV).unwrap();
     let data = record(TOKEN_SENT, TOKEN_RECV, &sl, &rl, 1_770_000_000);
 
@@ -148,8 +148,8 @@ fn the_token_session_produces_a_record_the_verifier_accepts() {
         "token response",
     );
 
-    // `_tokenBody`: ONE revealed sent range, anchored at the origin. X carries
-    // no secret, so the request is revealed entire.
+    // `_tokenBody`: ONE revealed sent range, anchored at the origin. Every
+    // token request is revealed whole.
     assert_eq!(data.sent.revealed.len(), 1);
     assert_eq!(data.sent.revealed[0].start, 0);
     assert!(data.sent.commitments.is_empty());
@@ -254,7 +254,7 @@ fn both_sessions_encode_and_carry_their_own_lengths() {
         (
             TOKEN_SENT,
             TOKEN_RECV,
-            Layout::token_request(TOKEN_SENT, &profiles::X.token.unwrap()).unwrap(),
+            Layout::token_request(TOKEN_SENT),
             Layout::token_response(TOKEN_RECV).unwrap(),
         ),
         (
@@ -273,23 +273,22 @@ fn both_sessions_encode_and_carry_their_own_lengths() {
     }
 }
 
-/// The GitHub token exchange is the one session whose REQUEST hides something,
-/// and the shape it must take is a prefix: the commitment reaches the
-/// transcript end, so the revealed run has no hole in it.
+/// The GitHub token exchange reveals its request whole, `client_secret`
+/// included: it is a public credential the verifier reads.
 #[test]
-fn the_github_exchange_commits_a_suffix_and_nothing_else() {
+fn the_github_exchange_is_revealed_whole() {
     const SENT: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\n\r\nclient_id=Iv1.x&code=abc&code_verifier=xyz&client_secret=deadbeef";
     const RECV: &[u8] =
         b"HTTP/1.1 200 OK\r\n\r\n{\"token_type\":\"bearer\",\"access_token\":\"SECRETBEARER\"}";
 
-    let sl = Layout::token_request(SENT, &profiles::GITHUB.token.unwrap()).unwrap();
+    let sl = Layout::token_request(SENT);
     let rl = Layout::token_response(RECV).unwrap();
     let data = record(SENT, RECV, &sl, &rl, 1_770_000_000);
 
     assert_tiles(&data.sent, data.sent_transcript_length, "github exchange");
     assert_eq!(data.sent.revealed.len(), 1);
     assert_eq!(data.sent.revealed[0].start, 0);
-    assert_eq!(data.sent.commitments.len(), 1);
-    assert_eq!(data.sent.commitments[0].end, SENT.len() as u32);
-    assert_eq!(count(&joined(&data.sent), b"deadbeef"), 0);
+    assert_eq!(data.sent.revealed[0].bytes.len(), SENT.len());
+    assert!(data.sent.commitments.is_empty());
+    assert_eq!(count(&joined(&data.sent), b"deadbeef"), 1);
 }

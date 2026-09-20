@@ -376,9 +376,8 @@ fn origin_form<B>(request: &mut hyper::Request<B>) -> Result<()> {
 ///
 /// The browser has its own progress from the tlsn wasm prover and never
 /// reaches this function. The caller this exists for is a server that
-/// notarizes on someone's behalf -- the GitHub Token-Exchange Service, whose
-/// HTTP caller waits out the whole session -- and which cannot report phases
-/// by parsing log lines.
+/// notarizes on someone's behalf, whose HTTP caller waits out the whole
+/// session, and which cannot report phases by parsing log lines.
 ///
 /// The request's URI must be absolute -- the host names the server -- but the
 /// wire carries the request-target in origin-form (`GET /path?query HTTP/1.1`),

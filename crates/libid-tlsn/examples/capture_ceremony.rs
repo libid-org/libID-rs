@@ -11,9 +11,10 @@
 //! You supply the app and the consent: register the redirect URI below on the
 //! app, run this, open the URL it prints, log in, consent. It receives the
 //! code, runs the token session and then the identity session, and writes
-//! `<platform>-ceremony-real.json` beside the generated fixture. The bearer,
-//! the secret and the code are never written: the record commits the first
-//! two and the third is spent.
+//! `<platform>-ceremony-real.json` beside the generated fixture. The bearer is
+//! never written: the record commits it. The request is revealed whole,
+//! credential included, so the file is a public record of a public credential;
+//! the code in it is spent.
 //!
 //! ONE REDIRECT URI SERVES EVERY PLATFORM: `http://127.0.0.1:8722/auth/callback`,
 //! the default here and the path the bridge serves. A path naming its platform
@@ -64,7 +65,9 @@ use libid_tlsn::{
     HttpRequest,
 };
 use libid_transcript::ceremony::{
+    form_encode,
     profiles,
+    token_body,
     Layout,
 };
 use serde_json::json;
@@ -120,21 +123,6 @@ fn args() -> Args {
         listen,
         out: out.expect("--out <dir>"),
     }
-}
-
-/// `application/x-www-form-urlencoded` and URL query encoding of one value,
-/// as `URLSearchParams` spells it: unreserved bytes as they are, the rest
-/// percent-encoded.
-fn form_encode(value: &str) -> String {
-    let mut out = String::new();
-    for b in value.bytes() {
-        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 fn form_decode(value: &str) -> String {
@@ -364,12 +352,16 @@ async fn main() {
     let (token, identity) = match args.platform.as_str() {
         "x" => {
             let profile = profiles::X;
-            let body = format!(
-                "grant_type=authorization_code&client_id={}&code={}&redirect_uri={}&code_verifier={verifier}",
-                form_encode(&args.client_id),
-                form_encode(&code),
-                form_encode(&args.redirect_uri),
-            );
+            let body = token_body(
+                &profile.token.unwrap(),
+                &[
+                    ("client_id", &args.client_id),
+                    ("code", &code),
+                    ("redirect_uri", &args.redirect_uri),
+                    ("code_verifier", &verifier),
+                ],
+            )
+            .unwrap_or_else(|e| fail(e.to_string()));
             // As the browser's `buildTokenRequest` sets them.
             let token = notarize(
                 request(
@@ -385,10 +377,7 @@ async fn main() {
                     body.as_bytes(),
                 ),
                 |sent, recv| {
-                    Ok((
-                        Layout::token_request(sent, &profile.token.unwrap())?,
-                        Layout::token_response(recv)?,
-                    ))
+                    Ok((Layout::token_request(sent), Layout::token_response(recv)?))
                 },
                 &sign,
             )
@@ -429,14 +418,19 @@ async fn main() {
                 .client_secret
                 .as_deref()
                 .expect("--client-secret for github");
-            let body = format!(
-                "client_id={}&code={}&redirect_uri={}&code_verifier={verifier}&client_secret={}",
-                form_encode(&args.client_id),
-                form_encode(&code),
-                form_encode(&args.redirect_uri),
-                form_encode(secret),
-            );
-            // As the Token-Exchange Service sets them; hyper appends the length.
+            let body = token_body(
+                &profile.token.unwrap(),
+                &[
+                    ("client_id", &args.client_id),
+                    ("code", &code),
+                    ("redirect_uri", &args.redirect_uri),
+                    ("code_verifier", &verifier),
+                    ("client_secret", secret),
+                ],
+            )
+            .unwrap_or_else(|e| fail(e.to_string()));
+            // The body is the profile's `token_fields` in order; hyper appends
+            // the length.
             let token = notarize(
                 request(
                     "POST",
@@ -450,10 +444,7 @@ async fn main() {
                     body.as_bytes(),
                 ),
                 |sent, recv| {
-                    Ok((
-                        Layout::token_request(sent, &profile.token.unwrap())?,
-                        Layout::token_response(recv)?,
-                    ))
+                    Ok((Layout::token_request(sent), Layout::token_response(recv)?))
                 },
                 &sign,
             )

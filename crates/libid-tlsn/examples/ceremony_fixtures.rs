@@ -1,9 +1,9 @@
 //! The ceremony session fixtures the contracts verify, generated.
 //!
 //! Four records, two per launch platform, built the way a ceremony builds
-//! them minus the MPC. Each request is composed as the browser or the
-//! Token-Exchange Service composes it and driven through hyper's http1
-//! client, the encoder under tlsn's prover, against a scripted platform
+//! them minus the MPC. Each request is composed as the browser composes it,
+//! the token body from the profile's field list, and driven through hyper's
+//! http1 client, the encoder under tlsn's prover, against a scripted platform
 //! answering as X and GitHub answer. The reveal layouts are
 //! `libid_transcript::ceremony`'s, the commitments are tlsn's SHA-256
 //! plaintext hashes, the record is `AttestedData::from_observed`, which is
@@ -44,6 +44,7 @@ use libid_tlsn::attest::{
 };
 use libid_transcript::ceremony::{
     profiles,
+    token_body,
     Layout,
 };
 use serde_json::json;
@@ -313,9 +314,16 @@ async fn main() {
 
     // ── X: the browser's two sessions ────────────────────────────────
     let x = profiles::X;
-    let body = format!(
-        "grant_type=authorization_code&client_id=myClient-1&code=abc123&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier={verifier}"
-    );
+    let body = token_body(
+        &x.token.unwrap(),
+        &[
+            ("client_id", "myClient-1"),
+            ("code", "abc123"),
+            ("redirect_uri", "https://app.example/cb"),
+            ("code_verifier", &verifier),
+        ],
+    )
+    .expect("x token body");
     // As `buildTokenRequest` sets them, `content-length` third and its own.
     let sent = exchange(
         request(
@@ -344,7 +352,7 @@ async fn main() {
         "x token",
         &sent,
         &recv,
-        &Layout::token_request(&sent, &x.token.unwrap()).expect("x token layout"),
+        &Layout::token_request(&sent),
         &Layout::token_response(&recv).expect("x token response layout"),
         "api.x.com",
     );
@@ -404,16 +412,27 @@ async fn main() {
     )
     .expect("write");
 
-    // ── GitHub: the service's exchange, the browser's identity read ──
+    // ── GitHub: the token exchange, the browser's identity read ──────
     let github = profiles::GITHUB;
-    let body = format!(
-        "client_id=Iv1.8a61f9b3a7aba766&code=abc123&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier={verifier}&client_secret=0123456789abcdef0123456789abcdef0123456789abcdef"
-    );
+    let body = token_body(
+        &github.token.unwrap(),
+        &[
+            ("client_id", "Iv1.8a61f9b3a7aba766"),
+            ("code", "abc123"),
+            ("redirect_uri", "https://app.example/cb"),
+            ("code_verifier", &verifier),
+            (
+                "client_secret",
+                "0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+        ],
+    )
+    .expect("github token body");
     let recv = answer(
         "application/json; charset=utf-8",
         r#"{"access_token":"gho_VGhpcyBpcyBub3QgYSByZWFsIGJlYXJlcg","token_type":"bearer","scope":""}"#,
     );
-    // As `libid-server-rs` sets them; hyper appends the length.
+    // The exchange's headers, lowercase; hyper appends the length.
     let sent = exchange(
         request(
             "POST",
@@ -433,8 +452,7 @@ async fn main() {
         "github token",
         &sent,
         &recv,
-        &Layout::token_request(&sent, &github.token.unwrap())
-            .expect("github token layout"),
+        &Layout::token_request(&sent),
         &Layout::token_response(&recv).expect("github token response layout"),
         "github.com",
     );
