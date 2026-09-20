@@ -12,9 +12,17 @@
 //! * [`wire`] — the length-prefixed JSON protocol the notary and prover speak
 //!   over the recovered socket after MPC-TLS closes.
 
+pub mod attestation;
 pub mod ceremony;
 pub mod ranges;
 pub mod wire;
+
+pub use attestation::{
+    AttestedData,
+    DirectionBlock,
+    RangeCommitment,
+    RevealedRange,
+};
 
 pub use ranges::{
     compute_field_snippet_range,

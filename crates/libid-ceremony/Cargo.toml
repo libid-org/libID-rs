@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 bincode.workspace = true
 libid-crypto.workspace = true
+libid-transcript.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

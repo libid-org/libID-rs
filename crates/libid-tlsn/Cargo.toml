@@ -26,7 +26,6 @@ publish = false
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
-libid-ceremony.workspace = true
 libid-transcript.workspace = true
 thiserror.workspace = true
 tlsn.workspace = true

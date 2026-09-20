@@ -39,9 +39,11 @@
 //!   out. No decoder: whoever decodes also checks, and
 //!   that is the chain and the client.
 
-pub mod attestation;
+/// The attested-data record now lives with the wire that carries it; these
+/// paths stay so a caller of this crate keeps compiling.
+pub use libid_transcript::attestation;
 
-pub use attestation::{
+pub use libid_transcript::{
     AttestedData,
     DirectionBlock,
     RangeCommitment,

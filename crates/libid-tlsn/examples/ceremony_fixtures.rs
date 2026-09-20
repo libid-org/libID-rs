@@ -31,7 +31,6 @@ use http_body_util::{
 };
 use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
-use libid_ceremony::attestation::AttestedData;
 use libid_crypto::{
     hex_to_signing_key,
     keccak256,
@@ -42,10 +41,13 @@ use libid_tlsn::attest::{
     FromObserved,
     ObservedSession,
 };
-use libid_transcript::ceremony::{
-    profiles,
-    token_body,
-    Layout,
+use libid_transcript::{
+    attestation::AttestedData,
+    ceremony::{
+        profiles,
+        token_body,
+        Layout,
+    },
 };
 use serde_json::json;
 use tlsn::{

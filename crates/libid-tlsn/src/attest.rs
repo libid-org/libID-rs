@@ -2,15 +2,15 @@
 //! profile pins.
 //!
 //! This is the only place tlsn's view of a transcript meets libID's. The
-//! layering is deliberate: `libid-ceremony` owns the bytes and is publishable,
+//! layering is deliberate: `libid-transcript` owns the bytes and is publishable,
 //! this crate owns the translation and is git-only because tlsn is. Nothing
 //! above needs to know that a `RangeSet` exists.
 //!
 //! The byte layout itself is the profile's rather than the specification's;
-//! `libid_ceremony::attestation` says under which requirement, and states each
+//! `libid_transcript::attestation` says under which requirement, and states each
 //! rule it keeps in full.
 
-use libid_ceremony::attestation::{
+use libid_transcript::attestation::{
     AttestedData,
     DirectionBlock,
     RangeCommitment,
@@ -112,9 +112,9 @@ pub struct ObservedDirection<'a> {
     pub direction: Direction,
 }
 
-/// Building a `libid-ceremony` record out of what this crate observed.
+/// Building a `libid-transcript` record out of what this crate observed.
 ///
-/// A trait, because both records belong to `libid-ceremony`, which is on the
+/// A trait, because both records belong to `libid-transcript`, which is on the
 /// release job's publish list and so must never name a tlsn type -- `tlsn` is
 /// an unpublished git dependency, and a crate that names it cannot go to
 /// crates.io at all. That is what keeps an inherent `impl` for either record
@@ -141,7 +141,7 @@ impl FromObserved<ObservedSession<'_>> for AttestedData {
     ///
     /// Section 9.1 of ceremony-common is attestation verification and its fee;
     /// it fixes no byte of this. REQ-COMMON-18 leaves the format to the profile
-    /// author, which is why `libid_ceremony::attestation` is the definition
+    /// author, which is why `libid_transcript::attestation` is the definition
     /// rather than a reading of one.
     ///
     /// The four values this reads were never four unrelated things: they are
@@ -264,7 +264,7 @@ mod tests {
     /// to account for the signed length exactly. That is its rule to enforce,
     /// not ours -- but a layout that cannot satisfy it produces attestations no
     /// verifier accepts, so it is worth asserting here on the way out.
-    fn assert_tiles(block: &libid_ceremony::DirectionBlock, length: u32) {
+    fn assert_tiles(block: &libid_transcript::DirectionBlock, length: u32) {
         let mut spans: Vec<(u32, u32)> = block
             .revealed
             .iter()
@@ -365,7 +365,7 @@ mod tests {
         // the client's. What stays checkable on this side is that every byte
         // the fields describe is present, which is the property the layout
         // gives the forward-parsing decoder something to walk.
-        let mut want = libid_ceremony::attestation::HEADER_LEN;
+        let mut want = libid_transcript::attestation::HEADER_LEN;
         for d in [&data.sent, &data.received] {
             want += 8 + 8; // one eight-byte count per list
             for r in &d.revealed {
@@ -554,7 +554,7 @@ mod tests {
             let data =
                 AttestedData::from_observed(observed(&partial, &commitments)).unwrap();
             headers.push(
-                data.encode().unwrap()[..libid_ceremony::attestation::HEADER_LEN]
+                data.encode().unwrap()[..libid_transcript::attestation::HEADER_LEN]
                     .to_vec(),
             );
         }

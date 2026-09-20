@@ -101,20 +101,25 @@ pub const MAX_RECV_DATA: usize = 1 << 15;
 /// buffers. With this guard, cancellation is the default on every exit path,
 /// including panics and the caller dropping the session future; the success
 /// path opts out by taking the handle back to join it.
-struct AbortOnDrop<T>(Option<JoinHandle<T>>);
+///
+/// Public because every service that drives a session alongside a spawned
+/// task -- a relay pump, a connection driver -- needs the same guard, and a
+/// second copy of it is a second place for the detach bug to come back.
+pub struct AbortOnDrop<T>(Option<JoinHandle<T>>);
 
 impl<T> AbortOnDrop<T> {
-    fn new(handle: JoinHandle<T>) -> Self {
+    /// Guard `handle`: the task is aborted when the guard drops.
+    pub fn new(handle: JoinHandle<T>) -> Self {
         Self(Some(handle))
     }
 
     /// The wrapped handle, for polling the task without disarming the guard.
-    fn handle_mut(&mut self) -> &mut JoinHandle<T> {
+    pub fn handle_mut(&mut self) -> &mut JoinHandle<T> {
         self.0.as_mut().expect("handle present until into_inner")
     }
 
     /// Disarm the guard and hand the handle back for joining.
-    fn into_inner(mut self) -> JoinHandle<T> {
+    pub fn into_inner(mut self) -> JoinHandle<T> {
         self.0.take().expect("handle present until into_inner")
     }
 }

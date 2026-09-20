@@ -50,7 +50,6 @@ use std::{
 use common::*;
 use http_body_util::Full;
 use hyper::body::Bytes;
-use libid_ceremony::attestation::AttestedData;
 use libid_crypto::{
     hex_to_signing_key,
     keccak256,
@@ -64,11 +63,14 @@ use libid_tlsn::{
     },
     HttpRequest,
 };
-use libid_transcript::ceremony::{
-    form_encode,
-    profiles,
-    token_body,
-    Layout,
+use libid_transcript::{
+    attestation::AttestedData,
+    ceremony::{
+        form_encode,
+        profiles,
+        token_body,
+        Layout,
+    },
 };
 use serde_json::json;
 use tlsn::connection::ServerName;
