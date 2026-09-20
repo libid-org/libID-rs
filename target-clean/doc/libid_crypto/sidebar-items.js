@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["Error"],"fn":["build_merkle_tree","double_hash_leaf","generate_keypair","hash_pair","hex_to_address","hex_to_signing_key","keccak256","merkle_proof","merkle_verify","pubkey_to_eth_address","pubkey_to_hex","recover_eth_claim","recover_public_key","sign_eth_claim","sign_message"],"type":["Result"]};

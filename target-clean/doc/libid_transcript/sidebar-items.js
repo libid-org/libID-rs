@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["Error"],"mod":["ceremony","ranges","types","wire"],"type":["Result"]};

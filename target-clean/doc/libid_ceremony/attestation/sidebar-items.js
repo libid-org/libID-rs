@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["HEADER_LEN"],"struct":["AttestedData","DirectionBlock","RangeCommitment","RevealedRange"]};

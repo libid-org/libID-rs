@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["MAX_RECV_DATA","MAX_SENT_DATA"],"enum":["Direction","Error","ProverStep"],"fn":["extract_handshake_data","prover","prover_generic","root_store","verifier"],"mod":["attest"],"struct":["Bytes","CommitmentOpening","HttpBody","HttpRequest","ProverResult","UserInfoParams","VerifierResult"],"type":["Result"]};

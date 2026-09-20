@@ -1,1 +1,0 @@
-{"rustc":11722972603611519644,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[5807471000344257904,"build_script_build",false,144983389901132466]],"local":[{"RerunIfChanged":{"output":"debug/build/mpz-circuits-data-a10b37736abe8f6f/output","paths":["../circuits-core/bristol"]}}],"rustflags":[],"config":0,"compile_kind":0}

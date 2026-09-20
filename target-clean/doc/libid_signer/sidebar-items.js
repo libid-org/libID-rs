@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["ManagedSigner","SignerError","SignerSource"],"type":["Result"]};
