@@ -46,4 +46,4 @@ serde_json.workspace = true
 # does and derives the verifier the way the contracts do.
 libid-crypto.workspace = true
 hex.workspace = true
-sha2 = "0.10"
+sha2 = "0.11"
