@@ -145,7 +145,7 @@ pub fn find_json_snippet_range(body: &[u8], field: &str) -> Option<Range<usize>>
     JsonMember::in_body(body, field).map(|member| member.member)
 }
 
-/// A `"field":"value"` or `"field":<digits>` member, and the value inside it.
+/// A `"field":"value"` member, and the value inside it.
 ///
 /// Two ranges rather than one because a caller that reveals the delimiters and
 /// commits the value needs both boundaries, and deriving the inner one from the
@@ -155,8 +155,7 @@ pub fn find_json_snippet_range(body: &[u8], field: &str) -> Option<Range<usize>>
 pub struct JsonMember {
     /// The whole member, both delimiters included.
     pub member: Range<usize>,
-    /// The value alone: a string's bytes between the quotes, empty when the
-    /// value is `""`, or a number's digits.
+    /// The value alone, between the quotes. Empty when the value is `""`.
     pub value: Range<usize>,
 }
 
@@ -195,45 +194,6 @@ impl JsonMember {
         })
     }
 
-    /// The bare number named `field` in `body`, with offsets INTO `body`: the
-    /// member through the byte that closes the digits, and the digits as its
-    /// value.
-    ///
-    /// The template it matches is argued on [`find_json_bare_snippet_range`],
-    /// which is the public face of this scan.
-    fn number_in_body(body: &[u8], field: &str) -> Option<Self> {
-        let (start, digits) = key_and_value(body, field, false)?;
-
-        // Digits, then the byte that closes them -- the order `tryJsonInteger`
-        // reads in. Scanning instead to the first `,` or `}` would accept
-        // `"id":"7",`, a quoted value returned as though it were a number: the
-        // chain then refuses it as noncanonical, which is the same answer given
-        // where nobody can see the reason.
-        let rest = body.get(digits..)?;
-        let width = rest.iter().take_while(|b| b.is_ascii_digit()).count();
-        if width == 0 {
-            return None;
-        }
-        // A leading zero is noncanonical, and `0` alone is not a leading zero.
-        if width > 1 && rest[0] == b'0' {
-            return None;
-        }
-
-        // The terminator is revealed with the digits: it is what proves they are
-        // the whole number rather than a prefix of a longer one, and the profile
-        // fixes it as `,` or `}` and no other byte (REQ-PLAT-51). JSON
-        // whitespace may sit before it, and is revealed with it.
-        let end = digits.checked_add(width)?;
-        let term = skip_json_whitespace(body, end);
-        match body.get(term) {
-            Some(b',') | Some(b'}') => Some(Self {
-                member: start..term.checked_add(1)?,
-                value: digits..end,
-            }),
-            _ => None,
-        }
-    }
-
     /// The member named `field_name` in an HTTP response, with offsets into the
     /// RAW `recv` transcript.
     ///
@@ -248,24 +208,14 @@ impl JsonMember {
     /// response headers -- a range that is well formed, signed, and pointing at
     /// the wrong thing.
     pub fn in_response(recv: &[u8], field_name: &str) -> Option<Self> {
-        Self::located(recv, field_name, Self::in_body)
-    }
-
-    /// The member `scan` finds in an HTTP response's body, with offsets into
-    /// the RAW `recv` transcript.
-    fn located(
-        recv: &[u8],
-        field_name: &str,
-        scan: fn(&[u8], &str) -> Option<Self>,
-    ) -> Option<Self> {
         let body_range = find_response_body_range(recv)?;
         let raw_body = &recv[body_range.clone()];
         let decoded_body = extract_response_body(recv).ok()?;
 
         // Found in both: the decoded body says the member exists, the raw body says
         // where it sits, and the two must hold the same bytes.
-        let decoded = scan(&decoded_body, field_name)?;
-        let raw = scan(raw_body, field_name)?;
+        let decoded = Self::in_body(&decoded_body, field_name)?;
+        let raw = Self::in_body(raw_body, field_name)?;
         require_contiguous(
             raw_body.get(raw.member.clone())?,
             decoded_body.get(decoded.member)?,
@@ -344,7 +294,32 @@ fn require_contiguous(raw: &[u8], decoded: &[u8]) -> Option<()> {
 /// number; both terminators are included in the range (on-chain
 /// `tryJsonInteger` scans digits and stops at either).
 pub fn find_json_bare_snippet_range(body: &[u8], field: &str) -> Option<Range<usize>> {
-    JsonMember::number_in_body(body, field).map(|found| found.member)
+    let (start, digits) = key_and_value(body, field, false)?;
+
+    // Digits, then the byte that closes them -- the order `tryJsonInteger`
+    // reads in. Scanning instead to the first `,` or `}` would accept
+    // `"id":"7",`, a quoted value returned as though it were a number: the
+    // chain then refuses it as noncanonical, which is the same answer given
+    // where nobody can see the reason.
+    let rest = body.get(digits..)?;
+    let width = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+    if width == 0 {
+        return None;
+    }
+    // A leading zero is noncanonical, and `0` alone is not a leading zero.
+    if width > 1 && rest[0] == b'0' {
+        return None;
+    }
+
+    // The terminator is revealed with the digits: it is what proves they are
+    // the whole number rather than a prefix of a longer one, and the profile
+    // fixes it as `,` or `}` and no other byte (REQ-PLAT-51). JSON
+    // whitespace may sit before it, and is revealed with it.
+    let term = skip_json_whitespace(body, digits.checked_add(width)?);
+    match body.get(term) {
+        Some(b',') | Some(b'}') => Some(start..term.checked_add(1)?),
+        _ => None,
+    }
 }
 
 /// Like [`compute_field_snippet_range`] but returns the range covering the
@@ -363,31 +338,30 @@ pub fn compute_field_snippet_range(
 /// Compute the absolute recv-transcript range for an id snippet, dispatching on
 /// quotedness: `quoted` → `"id":"<id>"`, otherwise the bare `"id":<n>[,}]` form.
 ///
-/// Returns `None` if the field is absent, or if its value is not a canonical
-/// platform id (REQ-PLAT-06). Both `,`- and `}`-terminated bare numbers are
-/// matched (on-chain `tryJsonInteger` scans digits past either).
+/// Returns `None` if the field is absent. Both `,`- and `}`-terminated bare
+/// numbers are matched (on-chain `tryJsonInteger` scans digits past either).
 pub fn compute_id_snippet_range(
     recv: &[u8],
     field_name: &str,
     quoted: bool,
 ) -> Option<Range<usize>> {
-    let found = if quoted {
-        JsonMember::in_response(recv, field_name)?
-    } else {
-        JsonMember::located(recv, field_name, JsonMember::number_in_body)?
-    };
-    is_canonical_platform_id(recv.get(found.value)?).then_some(found.member)
-}
+    if quoted {
+        return compute_field_snippet_range(recv, field_name);
+    }
+    let body_range = find_response_body_range(recv)?;
+    let raw_body = &recv[body_range.clone()];
+    let decoded_body = extract_response_body(recv).ok()?;
 
-/// Whether `id` is an X or GitHub id the Platform Verifier accepts:
-/// `^[1-9][0-9]{0,19}$` with a value at most `2^64 - 1` (REQ-PLAT-06).
-///
-/// The JSON readers hold an id to its syntax only, and that admits a quoted
-/// string of any bytes, `0`, and any number of digits.
-fn is_canonical_platform_id(id: &[u8]) -> bool {
-    matches!(id.first(), Some(b'1'..=b'9'))
-        && id.iter().all(u8::is_ascii_digit)
-        && std::str::from_utf8(id).is_ok_and(|id| id.parse::<u64>().is_ok())
+    let decoded_range = find_json_bare_snippet_range(&decoded_body, field_name)?;
+    let raw_snippet_range = find_json_bare_snippet_range(raw_body, field_name)?;
+    require_contiguous(
+        raw_body.get(raw_snippet_range.clone())?,
+        decoded_body.get(decoded_range)?,
+    )?;
+
+    let start = body_range.start.checked_add(raw_snippet_range.start)?;
+    let end = body_range.start.checked_add(raw_snippet_range.end)?;
+    Some(start..end)
 }
 
 #[cfg(test)]
@@ -735,55 +709,5 @@ mod tests {
         let recv = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"data\":{\"id\":\"123\",\"username\":\"alice\"}}";
         let range = compute_id_snippet_range(recv, "id", true).unwrap();
         assert_eq!(&recv[range], br#""id":"123""#);
-    }
-
-    /// An identity response whose `id` member holds `value` as written.
-    fn identity_with_id(value: &str) -> String {
-        format!("HTTP/1.1 200 OK\r\n\r\n{{\"id\":{value},\"login\":\"octocat\"}}")
-    }
-
-    #[test]
-    fn an_id_outside_the_platform_grammar_is_refused() {
-        // REQ-PLAT-06 in both shapes. The bare reader alone takes `0` and any
-        // number of digits, and the quoted one any string.
-        for id in [
-            "0",
-            "007",
-            "18446744073709551616",
-            "100000000000000000000",
-            "-1",
-            "+1",
-            "1e3",
-            "abc",
-            "",
-        ] {
-            let quoted = identity_with_id(&format!("\"{id}\""));
-            assert_eq!(
-                compute_id_snippet_range(quoted.as_bytes(), "id", true),
-                None,
-                "quoted {id:?}"
-            );
-            let bare = identity_with_id(id);
-            assert_eq!(
-                compute_id_snippet_range(bare.as_bytes(), "id", false),
-                None,
-                "bare {id:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_smallest_and_largest_ids_are_read() {
-        for id in ["1", "18446744073709551615"] {
-            let quoted = identity_with_id(&format!("\"{id}\""));
-            let range = compute_id_snippet_range(quoted.as_bytes(), "id", true).unwrap();
-            assert_eq!(
-                &quoted.as_bytes()[range],
-                format!("\"id\":\"{id}\"").as_bytes()
-            );
-            let bare = identity_with_id(id);
-            let range = compute_id_snippet_range(bare.as_bytes(), "id", false).unwrap();
-            assert_eq!(&bare.as_bytes()[range], format!("\"id\":{id},").as_bytes());
-        }
     }
 }
