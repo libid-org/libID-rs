@@ -105,31 +105,28 @@ impl AttestedData {
     /// where the prover wrote it. Naming the record puts the rule beside the
     /// field.
     ///
-    /// The canonical form is ASCII lowercase, and it is OURS to fix, the way
-    /// the byte layout above is. REQ-COMMON-21A has the Platform Verifier
-    /// compare the authenticated authority byte for byte against the constants
-    /// its profile pins; which bytes those are is the profile author's
-    /// decision, and this is where this implementation makes it. The generated
-    /// table in `libid-contracts` makes the same one and refuses any authority
-    /// that is not lowercase and free of a trailing dot, so the two agree at
-    /// the source rather than by coincidence.
+    /// The canonical form is ASCII lowercase with no trailing dot, and it is
+    /// OURS to fix, the way the byte layout above is. REQ-COMMON-21A has the
+    /// Platform Verifier compare the authenticated authority byte for byte
+    /// against the constants its profile pins; which bytes those are is the
+    /// profile author's decision, and this is where this implementation makes
+    /// it. The generated table in `libid-contracts` makes the same one and
+    /// refuses any authority that is not lowercase and free of a trailing dot,
+    /// so the two agree at the source rather than by coincidence.
     ///
-    /// It happens HERE rather than at each caller. The id is compared on chain against a constant a profile
-    /// pins, and ASCII case is the one difference a TLS stack hands back
-    /// without anyone noticing: `API.x.com` authenticates the same server and
-    /// hashes to a different id. Left to the call site it is a step every
-    /// future caller has to remember, and the one that forgets produces
-    /// attestations that are signed, well formed, and refused by every verifier
-    /// with nothing pointing at the capital letter. It sat at the one caller in
-    /// `libid-tlsn` while the other passed a string that was already lowercase
-    /// -- a rule kept by accident.
+    /// It happens HERE rather than at each caller. The id is compared on chain
+    /// against a constant a profile pins, and ASCII case and a trailing dot are
+    /// the differences a TLS stack hands back without anyone noticing:
+    /// `API.x.com` and `api.x.com.` authenticate the same server as
+    /// `api.x.com`, and each would otherwise hash to a different id. Left to
+    /// the call site it is a step every future caller has to remember, and the
+    /// one that forgets produces attestations that are signed, well formed, and
+    /// refused by every verifier with nothing pointing at the capital letter or
+    /// the dot. It sat at the one caller in `libid-tlsn` while the other passed
+    /// a string that was already lowercase -- a rule kept by accident.
     ///
-    /// The same sentence of section 9 that gives the lowercase form also says
-    /// no trailing dot, and this does NOT strip one. A dotted name therefore
-    /// hashes to an id no profile matches, and the session is refused -- which
-    /// is the safe direction, but it is a refusal rather than a repair. Fixing
-    /// it needs a caller that can produce the FQDN form, and a test; it is not
-    /// a rename's business to change what a signed field hashes.
+    /// One trailing dot is dropped, not every one: a second leaves an empty
+    /// label, which is no DNS name, so it still hashes to an id no profile pins.
     ///
     /// A string rather than a server-name type: this crate carries three
     /// dependencies and no TLS library at all, so it knows nothing about how
@@ -140,7 +137,8 @@ impl AttestedData {
     /// format, platform and session -- and those went with the fields the
     /// notary was handed rather than saw.
     pub fn authority_id_of(server_name: &str) -> [u8; 32] {
-        keccak256(server_name.to_ascii_lowercase().as_bytes())
+        let name = server_name.strip_suffix('.').unwrap_or(server_name);
+        keccak256(name.to_ascii_lowercase().as_bytes())
     }
 
     /// Lay the record out. This does NOT judge it: a malformed record is the
@@ -233,6 +231,28 @@ mod tests {
         assert_eq!(
             AttestedData::authority_id_of("API.X.com"),
             AttestedData::authority_id_of("api.x.com")
+        );
+    }
+
+    /// `CeremonyProfile.AUTHORITY_X_API` in `libid-contracts`:
+    /// `keccak256(bytes("api.x.com"))`.
+    const AUTHORITY_X_API: &str =
+        "4930142f5283d4a8eab0d24c588f00b21213ae2a47e7ed6c1dc6a57044f1655d";
+
+    #[test]
+    fn a_trailing_dot_names_the_same_authority() {
+        // `api.x.com.` is the absolute spelling of the same DNS name, and
+        // section 9 fixes the preimage without the dot.
+        for name in ["api.x.com", "api.x.com.", "API.X.COM."] {
+            assert_eq!(
+                hex::encode(AttestedData::authority_id_of(name)),
+                AUTHORITY_X_API,
+                "{name}"
+            );
+        }
+        assert_ne!(
+            hex::encode(AttestedData::authority_id_of("api.x.com..")),
+            AUTHORITY_X_API
         );
     }
 
