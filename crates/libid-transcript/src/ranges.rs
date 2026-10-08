@@ -394,7 +394,7 @@ mod tests {
     fn a_second_member_is_left_for_the_layout_to_commit() {
         // Not refused here: the reader's uniqueness rule is over the bytes it
         // was shown, and the layout is what decides those. `identity_response`
-        // reveals this one and commits the rest, so the reader sees one.
+        // reveals this one's anchors and commits the rest, so the reader sees one.
         let body = br#"{"login":"octocat","user":{"login":"impostor"}}"#;
         let range = member(body, "login").unwrap();
         assert_eq!(&body[range], br#""login":"octocat""#);
