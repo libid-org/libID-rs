@@ -41,9 +41,7 @@ use libid_transcript::{
         profiles,
         HeldSession,
         IdentityLinkWitness,
-        IdentityMembers,
         Layout,
-        TokenMembers,
         BLINDER_LEN,
     },
 };
@@ -287,6 +285,33 @@ fn framed_integer<'a>(block: &'a DirectionBlock, prefix: &[u8]) -> &'a RangeComm
     framed
 }
 
+/// `CeremonyAttestation.requireBearerHeaderRequest`'s framing: exactly one
+/// commitment, a revealed range ending in the bearer prefix where it starts,
+/// and one starting with CRLF where it ends.
+fn framed_bearer(block: &DirectionBlock) -> &RangeCommitment {
+    let [bearer] = block.commitments.as_slice() else {
+        panic!(
+            "NotOneCommitment: {} commitments in the identity request",
+            block.commitments.len()
+        );
+    };
+    let before = block
+        .revealed
+        .iter()
+        .find(|r| r.start + r.bytes.len() as u32 == bearer.start)
+        .expect("a revealed range ends where the commitment begins");
+    // The contract's `BEARER_PREFIX`, spelled out rather than taken from the
+    // crate under test.
+    assert!(
+        before.bytes.ends_with(b"\r\nauthorization: Bearer "),
+        "BadBearerFraming"
+    );
+    let after = revealed_at(block, bearer.end)
+        .expect("a revealed range begins where the commitment ends");
+    assert!(after.starts_with(b"\r\n"), "BadBearerFraming");
+    bearer
+}
+
 /// The bytes a commitment covers, from the full transcript.
 fn covered<'a>(recv: &'a [u8], c: &RangeCommitment) -> &'a [u8] {
     &recv[c.start as usize..c.end as usize]
@@ -348,22 +373,8 @@ fn the_identity_session_produces_a_record_the_verifier_accepts() {
 
     // `requireBearerHeaderRequest`: exactly one commitment, framed by the
     // header bytes REQ-COMMON-40 names.
-    assert_eq!(data.sent.commitments.len(), 1);
-    let bearer = &data.sent.commitments[0];
-    let before = data
-        .sent
-        .revealed
-        .iter()
-        .find(|r| r.start + r.bytes.len() as u32 == bearer.start)
-        .expect("a revealed range ends where the commitment begins");
-    assert!(before.bytes.ends_with(b"\r\nauthorization: Bearer "));
-    let after = data
-        .sent
-        .revealed
-        .iter()
-        .find(|r| r.start == bearer.end)
-        .expect("a revealed range begins where the commitment ends");
-    assert!(after.bytes.starts_with(b"\r\n"));
+    let bearer = framed_bearer(&data.sent);
+    assert_eq!(covered(ID_SENT, bearer), b"SECRETBEARER");
 
     // REQ-COMMON-39, counted over the CONCATENATION: one authorization header.
     let mut normalized = joined(&data.sent).to_ascii_lowercase();
@@ -438,16 +449,6 @@ fn sha256(value: &[u8], blinder: &[u8]) -> [u8; 32] {
         .into()
 }
 
-/// The commitment `block` carries over exactly `range`.
-fn signed(block: &DirectionBlock, range: &std::ops::Range<usize>) -> [u8; 32] {
-    block
-        .commitments
-        .iter()
-        .find(|c| c.start as usize == range.start && c.end as usize == range.end)
-        .expect("the record commits exactly the value")
-        .commitment
-}
-
 /// The witness the identity-link circuit opens, built from the prover's
 /// openings, against the commitments the verifier's record carries.
 fn assert_the_witness_opens_the_record(
@@ -465,45 +466,46 @@ fn assert_the_witness_opens_the_record(
     let witness = IdentityLinkWitness::build(profile, token.proved(), identity.proved())
         .expect("the witness opens the record");
 
-    // Each of the four recomputed here, independently of the builder:
-    // SHA256(value || blinder) with the `sha2` crate equals the commitment
-    // tlsn's `hash_plaintext` produced and the verifier's record carries, over
-    // exactly the value's range.
-    let members =
-        IdentityMembers::in_response(&identity.recv, &profile.identity.unwrap()).unwrap();
-    let [identity_bearer] =
-        <[_; 1]>::try_from(Layout::identity_request(&identity.sent).unwrap().commit)
-            .expect("the identity request commits the bearer alone");
-    for (opened, bytes, block, range) in [
+    // Each of the four is the commitment the verifier's own rules select
+    // from the record -- `requireFramedCommitment` for the token bearer and
+    // the handle, `requireFramedCommitment` or `requireFramedInteger` for the
+    // id as the profile shapes it, `requireBearerHeaderRequest` for the
+    // identity bearer -- and is recomputed here, independently of the
+    // builder: SHA256(value || blinder) with the `sha2` crate equals that
+    // commitment, which tlsn's `hash_plaintext` produced.
+    let session = profile.identity.unwrap();
+    let id = match session.id_shape {
+        profiles::IdShape::JsonString => framed_string(
+            &identity.record.received,
+            format!("\"{}\":\"", session.id_field).as_bytes(),
+        ),
+        profiles::IdShape::JsonInteger => framed_integer(
+            &identity.record.received,
+            format!("\"{}\":", session.id_field).as_bytes(),
+        ),
+    };
+    let handle = framed_string(
+        &identity.record.received,
+        format!("\"{}\":\"", session.handle_field).as_bytes(),
+    );
+    for (opened, bytes, framed) in [
         (
             witness.token_bearer(),
             &token.recv,
-            &token.record.received,
-            TokenMembers::in_response(&token.recv).unwrap().bearer.value,
+            framed_string(&token.record.received, b"\"access_token\":\""),
         ),
         (
             witness.identity_bearer(),
             &identity.sent,
-            &identity.record.sent,
-            identity_bearer,
+            framed_bearer(&identity.record.sent),
         ),
-        (
-            witness.id(),
-            &identity.recv,
-            &identity.record.received,
-            members.id.value,
-        ),
-        (
-            witness.handle(),
-            &identity.recv,
-            &identity.record.received,
-            members.handle.value,
-        ),
+        (witness.id(), &identity.recv, id),
+        (witness.handle(), &identity.recv, handle),
     ] {
-        let signed = signed(block, &range);
-        assert_eq!(sha256(&bytes[range.clone()], opened.blinder()), signed);
-        assert_eq!(*opened.commitment(), signed);
-        assert_eq!(opened.value().as_bytes(), &bytes[range]);
+        assert_eq!(*opened.commitment(), framed.commitment);
+        let value = covered(bytes, framed);
+        assert_eq!(opened.value().as_bytes(), value);
+        assert_eq!(sha256(value, opened.blinder()), framed.commitment);
     }
     assert_eq!(
         witness.token_bearer().value(),
