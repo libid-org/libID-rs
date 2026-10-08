@@ -2,24 +2,28 @@
 //!
 //! Included by `#[path]` from `capture_ceremony` and from
 //! `tests/secret_file.rs`; not an example of its own. Unix only: the mode is
-//! what keeps the file private.
+//! what keeps the file private, so elsewhere [`SecretFile::create`] refuses
+//! every path.
+//!
+//! A path inside a git work tree is accepted only where that tree's ignore
+//! rules match it. This repository ignores `*.secret.json`; libID-contracts
+//! and libID-circuits do not, so a witness named for this repository's rule
+//! is still refused inside either of them.
 
 #![allow(dead_code)]
 
 use std::{
-    fs::{
-        File,
-        OpenOptions,
-    },
+    ffi::OsStr,
+    fs::File,
     io::{
         ErrorKind,
         Write as _,
     },
-    os::unix::fs::OpenOptionsExt as _,
     path::{
         Path,
         PathBuf,
     },
+    process::Command,
 };
 
 /// The suffix a secret file's name ends in: what the `*.secret.json`
@@ -41,7 +45,9 @@ pub struct SecretFile {
 
 impl SecretFile {
     /// Create `path`, whose name must end in [`SECRET_SUFFIX`], as a new
-    /// owner-only file. An error names what is wrong and the fix.
+    /// owner-only file. Inside a git work tree, the tree's ignore rules must
+    /// match it. An error names what is wrong and the fix, and nothing is
+    /// created.
     pub fn create(path: PathBuf) -> Result<Self, String> {
         let named = path
             .file_name()
@@ -56,12 +62,8 @@ impl SecretFile {
                 path.display()
             ));
         }
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| refusal(&path, e))?;
+        refuse_unignored(&path)?;
+        let file = open_owner_only(&path).map_err(|e| refusal(&path, e))?;
         Ok(Self {
             path,
             file: Some(file),
@@ -116,6 +118,101 @@ impl Drop for SecretFile {
             self.file = None;
             let _ = std::fs::remove_file(&self.path);
         }
+    }
+}
+
+/// `path` opened new, mode 0600, never through a symlink.
+#[cfg(unix)]
+fn open_owner_only(path: &Path) -> std::io::Result<File> {
+    use std::{
+        fs::OpenOptions,
+        os::unix::fs::OpenOptionsExt as _,
+    };
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// No mode to make the file owner-only with, so no file.
+#[cfg(not(unix))]
+fn open_owner_only(_: &Path) -> std::io::Result<File> {
+    Err(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "a secret file is created with mode 0600, which only unix has; run this on Linux or macOS",
+    ))
+}
+
+/// `git` run in `dir`, or a refusal saying git is needed.
+fn git(dir: &Path, args: &[&OsStr]) -> Result<std::process::Output, String> {
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|e| {
+            format!(
+                "running git in {}: {e}. A secret file is written only where git can say it \
+                 will not be committed; install git",
+                dir.display()
+            )
+        })
+}
+
+/// Refuse `path` if it lies in a git work tree whose ignore rules do not
+/// match it.
+///
+/// Outside every work tree (`rev-parse --is-inside-work-tree` fails or does
+/// not print `true`) the path is accepted. Inside one, only `check-ignore`
+/// exiting 0 accepts it; exit 1 (not ignored, or tracked), any other git
+/// failure, and git being absent all refuse.
+fn refuse_unignored(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !parent.is_dir() {
+        return Err(format!(
+            "{}: the directory {} does not exist; create it first",
+            path.display(),
+            parent.display()
+        ));
+    }
+    let inside = git(
+        parent,
+        &["rev-parse".as_ref(), "--is-inside-work-tree".as_ref()],
+    )?;
+    if !inside.status.success() || inside.stdout.trim_ascii() != b"true" {
+        return Ok(());
+    }
+    let name = path
+        .file_name()
+        .expect("the suffix check found a file name");
+    let ignored = git(
+        parent,
+        &["check-ignore".as_ref(), "-q".as_ref(), "--".as_ref(), name],
+    )?;
+    match ignored.status.code() {
+        Some(0) => Ok(()),
+        Some(1) => {
+            let top = git(parent, &["rev-parse".as_ref(), "--show-toplevel".as_ref()])
+                .map(|out| String::from_utf8_lossy(out.stdout.trim_ascii()).into_owned())
+                .unwrap_or_default();
+            Err(format!(
+                "{} is in the git work tree {top} and not ignored by it, so it could be \
+                 committed. Name a path outside every git work tree, such as one in the system \
+                 temporary directory",
+                path.display()
+            ))
+        }
+        _ => Err(format!(
+            "{}: git check-ignore failed ({}: {}), so whether the path could be committed is \
+             unknown. Name a path outside every git work tree",
+            path.display(),
+            ignored.status,
+            String::from_utf8_lossy(ignored.stderr.trim_ascii())
+        )),
     }
 }
 

@@ -10,10 +10,17 @@ use std::{
         symlink,
         PermissionsExt as _,
     },
-    path::PathBuf,
+    path::{
+        Path,
+        PathBuf,
+    },
+    process::Command,
 };
 
-use secret_file::SecretFile;
+use secret_file::{
+    SecretFile,
+    SECRET_SUFFIX,
+};
 
 /// A fresh directory for one test, removed when it ends.
 struct Scratch(PathBuf);
@@ -116,4 +123,47 @@ fn an_unwritten_file_is_removed() {
     let said = SecretFile::create(discarded.clone()).unwrap().discard();
     assert!(said.ends_with("was removed"), "{said}");
     assert!(!discarded.exists());
+}
+
+fn git(dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("git runs")
+}
+
+#[test]
+fn a_path_in_a_work_tree_that_does_not_ignore_it_is_refused() {
+    let scratch = Scratch::new("worktree");
+    assert!(git(&scratch.0, &["init", "-q"]).status.success());
+    let path = scratch.join("w.secret.json");
+    let err = SecretFile::create(path.clone()).err().unwrap();
+    assert!(err.contains("not ignored by it"), "{err}");
+    assert!(!path.exists(), "a refused path was created");
+
+    std::fs::write(scratch.join(".gitignore"), "*.secret.json\n").unwrap();
+    SecretFile::create(path.clone())
+        .unwrap()
+        .write(b"{}")
+        .unwrap();
+    assert!(path.exists());
+}
+
+#[test]
+fn this_repository_ignores_the_secret_suffix() {
+    // What lets `--witness-out` name a path inside this checkout at all.
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ignored = |name: &str| {
+        git(here, &["check-ignore", "-q", "--no-index", "--", name])
+            .status
+            .code()
+    };
+    assert_eq!(ignored(&format!("x{SECRET_SUFFIX}")), Some(0));
+    assert_eq!(
+        ignored("x.json"),
+        Some(1),
+        "the rule is the suffix, not `*`"
+    );
 }
