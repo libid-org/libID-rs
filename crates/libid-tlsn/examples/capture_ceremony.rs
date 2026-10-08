@@ -101,6 +101,7 @@ use libid_transcript::{
         Layout,
         TokenMembers,
     },
+    extract_response_body,
 };
 use secret_file::{
     SecretFile,
@@ -262,7 +263,6 @@ struct Session {
     record: Vec<u8>,
     signature: Vec<u8>,
     created_at: u64,
-    response_body: Vec<u8>,
     authority: String,
     /// Both directions in full, the openings and the record, as the prover
     /// holds them. Private: the witness is built from them and they are never
@@ -337,7 +337,6 @@ async fn notarize(
         created_at,
         authority,
         held: prover.held_session(data),
-        response_body: prover.response_body,
     })
 }
 
@@ -646,7 +645,10 @@ async fn run(
 /// session. An error names what is wrong and never prints the response, which
 /// holds the bearer.
 fn bearer_of(token: &Session) -> Result<String, String> {
-    let json: serde_json::Value = serde_json::from_slice(&token.response_body)
+    let recv = &token.held.recv;
+    let body = extract_response_body(recv)
+        .map_err(|_| "the token response has no body that decodes".to_owned())?;
+    let json: serde_json::Value = serde_json::from_slice(&body)
         .map_err(|_| "the token response is not JSON".to_owned())?;
     let bearer = json[TokenMembers::FIELD]
         .as_str()
@@ -654,7 +656,6 @@ fn bearer_of(token: &Session) -> Result<String, String> {
     if !bearer.is_ascii() {
         return Err("the token response's `access_token` is not ASCII".into());
     }
-    let recv = &token.held.recv;
     let committed = TokenMembers::in_response(recv)
         .map_err(|e| format!("the token response's committed bearer: {e}"))?
         .bearer

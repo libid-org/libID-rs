@@ -336,14 +336,18 @@ pub struct ProverResult<T> {
 impl<T> ProverResult<T> {
     /// This session as [`libid_transcript::ceremony::IdentityLinkWitness::build`]
     /// takes it, with `record` the attested data the notary signed for it.
+    ///
+    /// Consumes the result: the transcript moves rather than being copied,
+    /// and the TLS secrets and recovered I/O are dropped. The decoded response
+    /// body is [`libid_transcript::extract_response_body`] of `held.recv`.
     pub fn held_session(
-        &self,
+        self,
         record: libid_transcript::AttestedData,
     ) -> libid_transcript::ceremony::HeldSession {
         libid_transcript::ceremony::HeldSession {
-            sent: self.sent.clone(),
-            recv: self.recv.clone(),
             openings: self.commitment_openings.iter().map(Into::into).collect(),
+            sent: self.sent,
+            recv: self.recv,
             record,
         }
     }
