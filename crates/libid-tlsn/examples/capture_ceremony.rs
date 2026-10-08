@@ -11,10 +11,12 @@
 //! You supply the app and the consent: register the redirect URI below on the
 //! app, run this, open the URL it prints, log in, consent. It receives the
 //! code, runs the token session and then the identity session, and writes
-//! `<platform>-ceremony-real.json` beside the generated fixture. The bearer is
-//! never written: the record commits it. The request is revealed whole,
-//! credential included, so the file is a public record of a public credential;
-//! the code in it is spent.
+//! `<platform>-ceremony-real.json` into `--out`, beside the generated fixture.
+//!
+//! That file is public. It carries no bearer, id or handle: the records commit
+//! them. The token request is revealed whole, client credential included, so
+//! the file is a public record of a public credential; the code in it is
+//! spent.
 //!
 //! ONE REDIRECT URI SERVES EVERY PLATFORM: `http://127.0.0.1:8722/auth/callback`,
 //! the default here and the path the bridge serves. A path naming its platform
@@ -29,11 +31,22 @@
 //!     --platform x --client-id ID --out <dir>
 //! ```
 //!
-//! It also writes the identity-link circuit's witness -- the bearer, the id
-//! and the handle with their blinders -- to
-//! `<platform>-identity-link-witness.secret.json` (or `--witness-out`),
-//! owner-only. That file holds the live bearer: prove from it, then delete it
-//! and revoke the token.
+//! It then writes the identity-link circuit's witness -- the bearer, the id
+//! and the handle, each with its blinder -- to a NEW owner-only file in the
+//! system temporary directory, never beside the record:
+//! `$TMPDIR/libid-<platform>-identity-link-witness-<unix time>.secret.json`, or
+//! `--witness-out <path>`, which must not exist yet. It
+//! prints the path and never the contents.
+//!
+//! That file is secret, and not only while the token lives. The bearer is a
+//! live credential until you revoke the token. The id and handle blinders are
+//! secret for good: anyone holding them can link the record's commitments, and
+//! any on-chain commitment to the same values, to the plaintext account.
+//! Revoking the token does not undo that. Prove from the witness, then delete
+//! it and revoke the token; never copy it into a fixtures directory.
+//!
+//! The public record is written first. If the witness cannot be built, the
+//! error names which value failed and the record is kept.
 //!
 //! `--redirect-uri` and `--listen` override the pair for an app registered
 //! elsewhere; they move together, since the code arrives on the address the
@@ -107,21 +120,29 @@ struct Args {
     witness_out: Option<PathBuf>,
 }
 
-/// Create `path` readable by its owner alone, before any byte lands in it.
-fn write_private(path: &std::path::Path, contents: &str) {
+/// Create `path` as a new file readable by its owner alone, before any byte
+/// lands in it. An existing path, a symlink included, is refused rather than
+/// followed or truncated.
+fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
     use std::{
         io::Write as _,
         os::unix::fs::OpenOptionsExt as _,
     };
     let mut file = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(path)
-        .unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => format!(
+                "{} already exists; the witness is only written to a new file. \
+                 Remove it, or pass `--witness-out <path>` naming one that does not exist",
+                path.display()
+            ),
+            _ => format!("{}: {e}", path.display()),
+        })?;
     file.write_all(contents.as_bytes())
-        .unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn args() -> Args {
@@ -410,7 +431,7 @@ async fn main() {
     let code = receive_code(&args.listen, &state).await;
     eprintln!("code received; running the token session");
 
-    let (token, identity, witness) = match args.platform.as_str() {
+    let (profile, endpoints, token, identity) = match args.platform.as_str() {
         "x" => {
             let profile = profiles::X;
             let body = token_body(
@@ -444,7 +465,7 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
-            let bearer = bearer_of(&token.response_body);
+            let bearer = bearer_of(&token.response_body).unwrap_or_else(|e| fail(e));
             eprintln!("token received; running the identity session");
             let identity = notarize(
                 request(
@@ -468,13 +489,14 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
-            let witness =
-                IdentityLinkWitness::build(&profile, token.proved(), identity.proved())
-                    .unwrap_or_else(|e| fail(format!("identity-link witness: {e}")));
             (
-                session_json("https://api.x.com/2/oauth2/token", &token),
-                session_json("https://api.x.com/2/users/me", &identity),
-                witness,
+                profile,
+                (
+                    "https://api.x.com/2/oauth2/token",
+                    "https://api.x.com/2/users/me",
+                ),
+                token,
+                identity,
             )
         }
         _ => {
@@ -515,7 +537,7 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
-            let bearer = bearer_of(&token.response_body);
+            let bearer = bearer_of(&token.response_body).unwrap_or_else(|e| fail(e));
             eprintln!("token received; running the identity session");
             // As the browser's `identityRequest` sets them.
             let identity = notarize(
@@ -542,13 +564,14 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
-            let witness =
-                IdentityLinkWitness::build(&profile, token.proved(), identity.proved())
-                    .unwrap_or_else(|e| fail(format!("identity-link witness: {e}")));
             (
-                session_json("https://github.com/login/oauth/access_token", &token),
-                session_json("https://api.github.com/user", &identity),
-                witness,
+                profile,
+                (
+                    "https://github.com/login/oauth/access_token",
+                    "https://api.github.com/user",
+                ),
+                token,
+                identity,
             )
         }
     };
@@ -556,8 +579,8 @@ async fn main() {
     let mut file = submission_json(&args.platform, &notary);
     file["source"] = json!("captured: a real MPC-TLS session against the platform, the verifier in-process, by libid-rs examples/capture_ceremony.rs");
     file["captured_at"] = json!(now());
-    file["token"] = token;
-    file["identity"] = identity;
+    file["token"] = session_json(endpoints.0, &token);
+    file["identity"] = session_json(endpoints.1, &identity);
     let path = args
         .out
         .join(format!("{}-ceremony-real.json", args.platform));
@@ -565,32 +588,53 @@ async fn main() {
         .expect("write");
     println!("wrote {}", path.display());
 
-    // The witness holds the live bearer, so it is a secret: written owner-only
-    // beside nothing that gets committed, and never printed. Prove from it,
-    // then delete it and revoke the token.
+    // Built after the record is on disk, so a witness that cannot be built
+    // costs the witness and not the capture.
+    let witness = IdentityLinkWitness::build(&profile, token.proved(), identity.proved())
+        .unwrap_or_else(|e| {
+            fail(format!(
+                "identity-link witness: {e}. The public record {} is kept; no witness was written",
+                path.display()
+            ))
+        });
     let witness_path = args.witness_out.unwrap_or_else(|| {
-        args.out.join(format!(
-            "{}-identity-link-witness.secret.json",
-            args.platform
+        std::env::temp_dir().join(format!(
+            "libid-{}-identity-link-witness-{}.secret.json",
+            args.platform,
+            now()
         ))
     });
     write_private(
         &witness_path,
-        &(serde_json::to_string_pretty(&witness).unwrap() + "\n"),
-    );
+        &(serde_json::to_string_pretty(&witness).expect("witness JSON") + "\n"),
+    )
+    .unwrap_or_else(|e| {
+        fail(format!(
+            "{e}. The public record {} is kept; no witness was written",
+            path.display()
+        ))
+    });
     println!(
-        "wrote {} (owner-only; it holds the live bearer: prove, then delete it and revoke the token)",
+        "wrote {} (owner-only, secret: the live bearer until you revoke the token, and \
+         blinders that link the commitments to the account for good. Prove, then delete it \
+         and revoke the token)",
         witness_path.display()
     );
 }
 
-/// The bearer out of the token response, which the identity session needs
-/// and nothing else sees: it is committed in both records and not written.
-fn bearer_of(body: &[u8]) -> String {
-    let json: serde_json::Value =
-        serde_json::from_slice(body).expect("the token response is JSON");
-    json["access_token"]
+/// The bearer out of the token response, which the identity session sends.
+///
+/// The public record commits it and never carries it; the witness carries it.
+/// An error names what is wrong and never prints the response, which holds
+/// the bearer.
+fn bearer_of(body: &[u8]) -> Result<String, String> {
+    let json: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|_| "the token response is not JSON".to_owned())?;
+    let bearer = json["access_token"]
         .as_str()
-        .unwrap_or_else(|| panic!("no access_token in the token response: {json}"))
-        .to_owned()
+        .ok_or("the token response has no string `access_token`")?;
+    if !bearer.is_ascii() {
+        return Err("the token response's `access_token` is not ASCII".into());
+    }
+    Ok(bearer.to_owned())
 }
