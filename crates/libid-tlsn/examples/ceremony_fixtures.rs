@@ -37,20 +37,22 @@ use libid_crypto::{
     pubkey_to_eth_address,
     sign_eth_claim,
 };
-use libid_tlsn::attest::{
-    FromObserved,
-    ObservedSession,
+use libid_tlsn::{
+    attest::{
+        FromObserved,
+        ObservedSession,
+    },
+    CommitmentOpening,
 };
 use libid_transcript::{
     attestation::AttestedData,
     ceremony::{
-        self,
         profiles,
         token_body,
+        HeldSession,
         IdentityLinkWitness,
         Layout,
         Opening,
-        ProvedSession,
     },
 };
 use serde_json::json;
@@ -183,36 +185,18 @@ fn blinder(session: &str, index: usize) -> [u8; 16] {
     seed[..16].try_into().expect("16 bytes")
 }
 
-struct Record {
-    sent: Vec<u8>,
-    recv: Vec<u8>,
-    data: AttestedData,
-    openings: Vec<Opening>,
-}
-
-impl Record {
-    fn proved(&self) -> ProvedSession<'_> {
-        ProvedSession {
-            sent: &self.sent,
-            recv: &self.recv,
-            openings: &self.openings,
-            record: &self.data,
-        }
-    }
-
-    /// The openings as the fixture lists them.
-    fn openings_json(&self) -> Vec<serde_json::Value> {
-        self.openings
-            .iter()
-            .map(|opening| {
-                json!({
-                    "direction": opening.direction.as_str(),
-                    "ranges": opening.ranges.iter().map(|r| json!([r.start, r.end])).collect::<Vec<_>>(),
-                    "blinder": hex0x(&opening.blinder),
-                })
+/// The openings as the fixture lists them.
+fn openings_json(openings: &[Opening]) -> Vec<serde_json::Value> {
+    openings
+        .iter()
+        .map(|opening| {
+            json!({
+                "direction": opening.direction.as_str(),
+                "ranges": opening.ranges.iter().map(|r| json!([r.start, r.end])).collect::<Vec<_>>(),
+                "blinder": hex0x(&opening.blinder),
             })
-            .collect()
-    }
+        })
+        .collect()
 }
 
 /// The identity-link witness of the two sessions, which the fixture carries
@@ -223,8 +207,8 @@ impl Record {
 /// commitment hash.
 fn witness_json(
     profile: &libid_transcript::ceremony::Profile,
-    token: &Record,
-    identity: &Record,
+    token: &HeldSession,
+    identity: &HeldSession,
 ) -> serde_json::Value {
     let witness = IdentityLinkWitness::build(profile, token.proved(), identity.proved())
         .unwrap_or_else(|e| panic!("identity-link witness: {e}"));
@@ -240,7 +224,7 @@ fn build(
     sl: &Layout,
     rl: &Layout,
     authority: &str,
-) -> Record {
+) -> HeldSession {
     let transcript = Transcript::new(sent, recv);
 
     let mut commits = TranscriptCommitConfig::builder(&transcript);
@@ -298,14 +282,12 @@ fn build(
                 .collect();
             let blinder = blinder(session, index);
             let value = hasher.hash_prefixed(&plaintext, &blinder);
-            openings.push(Opening {
-                direction: match direction {
-                    Direction::Sent => ceremony::Direction::Sent,
-                    Direction::Received => ceremony::Direction::Received,
-                },
+            // What `prover_generic` hands back for this commitment.
+            openings.push(Opening::from(&CommitmentOpening {
+                direction: *direction,
                 ranges: ranges.clone(),
                 blinder: blinder.to_vec(),
-            });
+            }));
             TranscriptCommitment::Hash(PlaintextHash {
                 direction: direction.to_owned(),
                 idx: idx.clone(),
@@ -324,11 +306,11 @@ fn build(
         created_at: T0,
     })
     .expect("record");
-    Record {
+    HeldSession {
         sent: sent.to_vec(),
         recv: recv.to_vec(),
-        data,
         openings,
+        record: data,
     }
 }
 
@@ -336,10 +318,10 @@ fn session_json(
     endpoint: &str,
     sent: &[u8],
     recv: &[u8],
-    record: &Record,
+    held: &HeldSession,
     sign: &dyn Fn(&[u8; 32]) -> Vec<u8>,
 ) -> serde_json::Value {
-    let attested = record.data.encode().expect("encode");
+    let attested = held.record.encode().expect("encode");
     let signature = sign(&keccak256(&attested));
     json!({
         "endpoint": endpoint,
@@ -347,7 +329,7 @@ fn session_json(
         "received": hex0x(recv),
         "attested_data": hex0x(&attested),
         "notary_signature": hex0x(&signature),
-        "openings": record.openings_json(),
+        "openings": openings_json(&held.openings),
     })
 }
 

@@ -318,6 +318,12 @@ pub struct ProverResult<T> {
     pub response_body: Vec<u8>,
     /// The TLS secrets for proof construction.
     pub secrets: Secrets,
+    /// The bytes this session sent, in full: what the `Sent` openings'
+    /// ranges index into.
+    pub sent: Vec<u8>,
+    /// The bytes this session received, in full: what the `Received`
+    /// openings' ranges index into.
+    pub recv: Vec<u8>,
     /// One opening per commitment this session made, in no particular order:
     /// tlsn hands the commitments back from a set, so a caller finds its
     /// opening by the `ranges` it covers rather than by position. Empty when
@@ -325,6 +331,22 @@ pub struct ProverResult<T> {
     pub commitment_openings: Vec<CommitmentOpening>,
     /// The recovered I/O stream after MPC-TLS completes.
     pub recovered_io: T,
+}
+
+impl<T> ProverResult<T> {
+    /// This session as [`libid_transcript::ceremony::IdentityLinkWitness::build`]
+    /// takes it, with `record` the attested data the notary signed for it.
+    pub fn held_session(
+        &self,
+        record: libid_transcript::AttestedData,
+    ) -> libid_transcript::ceremony::HeldSession {
+        libid_transcript::ceremony::HeldSession {
+            sent: self.sent.clone(),
+            recv: self.recv.clone(),
+            openings: self.commitment_openings.iter().map(Into::into).collect(),
+            record,
+        }
+    }
 }
 
 /// Result from the MPC-TLS verifier (notary).
@@ -541,6 +563,7 @@ where
         let transcript = prover.transcript().clone();
         let sent = transcript.sent();
         let recv = transcript.received();
+        let full = (sent.to_vec(), recv.to_vec());
         // The ceremony layouts derive their commitments as the complement of
         // the reveals, so each direction tiles by construction -- which is what
         // the Platform Verifier's coverage check demands.
@@ -671,7 +694,7 @@ where
         })?;
         handle.close();
 
-        Ok((body, secrets, commitment_openings))
+        Ok((body, secrets, commitment_openings, full))
     };
     tokio::pin!(setup);
 
@@ -680,7 +703,7 @@ where
     // already submitted to it may then never resolve, so fail instead of
     // pending forever.
     let mut finished_driver = None;
-    let (body, secrets, commitment_openings) = tokio::select! {
+    let (body, secrets, commitment_openings, (sent, recv)) = tokio::select! {
         biased;
         res = &mut setup => res?,
         driver_res = driver_task.handle_mut() => {
@@ -712,6 +735,8 @@ where
     Ok(ProverResult {
         response_body: body.to_vec(),
         secrets,
+        sent,
+        recv,
         commitment_openings,
         recovered_io,
     })
