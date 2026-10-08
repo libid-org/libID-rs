@@ -10,10 +10,10 @@
 //! and asserts, on the decoded record, the rules the Solidity side enforces.
 //! It is not a network test and runs no MPC: there is no TLS here, and the
 //! session is reproduced from the layouts rather than notarized. The
-//! commitments are tlsn's own `PlaintextHash` values, computed by tlsn's SHA-256
-//! hasher over `plaintext || blinder` -- the order its commitment circuit
-//! hashes in -- with a 16-byte blinder per commitment, and the identity-link
-//! witness is built from those openings and checked against them.
+//! commitments are tlsn's own `PlaintextHash` values, computed by tlsn's
+//! `hash_plaintext` with a tlsn `Blinder` per commitment, and the
+//! identity-link witness is built from those openings and checked against
+//! them.
 //!
 //! What this does not check is that a live MPC session computes the same
 //! value. `prover_generic` dials `<host>:443` and trusts the WebPKI roots only,
@@ -39,23 +39,25 @@ use libid_transcript::{
     ceremony::{
         self,
         profiles,
+        HeldSession,
         IdentityLinkWitness,
         IdentityMembers,
         Layout,
-        ProvedSession,
+        TokenMembers,
         BLINDER_LEN,
     },
 };
 use rangeset::set::RangeSet;
 use tlsn::{
     hash::{
-        HashAlgId,
-        HashAlgorithm,
+        Blinder,
         Sha256,
-        TypedHash,
     },
     transcript::{
-        hash::PlaintextHash,
+        hash::{
+            hash_plaintext,
+            PlaintextHash,
+        },
         Direction,
         Transcript,
         TranscriptCommitment,
@@ -76,51 +78,41 @@ const GITHUB_TOKEN_RECV: &[u8] =
 const GITHUB_ID_SENT: &[u8] = b"GET /user HTTP/1.1\r\nhost: api.github.com\r\nauthorization: Bearer gho_SECRETBEARER\r\nconnection: close\r\n\r\n";
 const GITHUB_ID_RECV: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\n  \"login\": \"OctoCat\",\n  \"id\": 583231 ,\n  \"node_id\": \"MDQ6VXNlcjU4MzIzMQ==\",\n  \"plan\": \"pro\"\n}";
 
-/// A session as the prover and the notary each end up holding it.
-struct Notarized {
-    sent: &'static [u8],
-    recv: &'static [u8],
-    /// The prover's side: one opening per commitment, as `prover_generic`
-    /// hands them back.
-    openings: Vec<CommitmentOpening>,
-    /// The notary's side: the record built from the verifier's commitments.
-    data: AttestedData,
-}
+/// The authority each session's server authenticates as.
+const X_API: &str = "api.x.com";
+const GITHUB_WEB: &str = "github.com";
+const GITHUB_API: &str = "api.github.com";
 
-impl Notarized {
-    fn new(sent: &'static [u8], recv: &'static [u8], sl: &Layout, rl: &Layout) -> Self {
-        let (openings, data) = record(sent, recv, sl, rl, 1_770_000_000);
-        Self {
-            sent,
-            recv,
-            openings,
-            data,
-        }
-    }
-
-    fn openings(&self) -> Vec<ceremony::Opening> {
-        self.openings.iter().map(ceremony::Opening::from).collect()
-    }
-
-    fn proved<'a>(&'a self, openings: &'a [ceremony::Opening]) -> ProvedSession<'a> {
-        ProvedSession {
-            sent: self.sent,
-            recv: self.recv,
-            openings,
-            record: &self.data,
-        }
+/// A session as its prover and its notary end up holding it: the full
+/// transcript, the prover's openings, and the notary's record.
+fn notarized(
+    sent: &[u8],
+    recv: &[u8],
+    sl: &Layout,
+    rl: &Layout,
+    authority: &str,
+) -> HeldSession {
+    let (openings, record) = record(sent, recv, sl, rl, authority);
+    HeldSession {
+        sent: sent.to_vec(),
+        recv: recv.to_vec(),
+        openings: openings.iter().map(ceremony::Opening::from).collect(),
+        record,
     }
 }
 
-/// A distinct 16-byte blinder per commitment.
-fn blinder(direction: Direction, index: usize) -> Vec<u8> {
+/// A distinct tlsn blinder per commitment. tlsn constructs one only from
+/// randomness or by deserializing, so these are deserialized from fixed bytes
+/// and the records reproduce.
+fn blinder(direction: Direction, index: usize) -> Blinder {
     let tag = match direction {
         Direction::Sent => 0x50,
         Direction::Received => 0xA0,
     };
-    (0..BLINDER_LEN as u8)
+    let bytes: Vec<u8> = (0..BLINDER_LEN as u8)
         .map(|i| tag ^ (index as u8) ^ i.wrapping_mul(17))
-        .collect()
+        .collect();
+    serde_json::from_value(serde_json::json!(bytes)).expect("a 16-byte blinder")
 }
 
 /// Turn a pair of layouts into the [`ObservedSession`] a notary's verifier
@@ -128,15 +120,15 @@ fn blinder(direction: Direction, index: usize) -> Vec<u8> {
 ///
 /// This is the step a real session performs inside MPC: the prover states what
 /// it reveals, and the verifier ends up holding the revealed transcript and a
-/// commitment per hidden run. Each commitment is tlsn's `PlaintextHash`, the
-/// SHA-256 of the committed bytes followed by the blinder, computed by tlsn's
-/// hasher; the prover keeps the blinder as a [`CommitmentOpening`].
+/// commitment per hidden run. Each commitment is tlsn's `PlaintextHash`, from
+/// tlsn's `hash_plaintext` over the committed bytes and a tlsn [`Blinder`];
+/// the prover keeps the blinder as a [`CommitmentOpening`].
 fn record(
     sent: &[u8],
     recv: &[u8],
     sl: &Layout,
     rl: &Layout,
-    created_at: u64,
+    authority: &str,
 ) -> (Vec<CommitmentOpening>, AttestedData) {
     let transcript = Transcript::new(sent, recv);
     let partial = transcript.to_partial(
@@ -156,24 +148,21 @@ fn record(
             commitments.push(TranscriptCommitment::Hash(PlaintextHash {
                 direction,
                 idx: RangeSet::from(c.clone()),
-                hash: TypedHash {
-                    alg: HashAlgId::SHA256,
-                    value: hasher.hash_prefixed(&bytes[c.clone()], &blinder),
-                },
+                hash: hash_plaintext(&hasher, &bytes[c.clone()], &blinder),
             }));
             openings.push(CommitmentOpening {
                 direction,
                 ranges: vec![c.clone()],
-                blinder,
+                blinder: blinder.as_bytes().to_vec(),
             });
         }
     }
 
     let data = AttestedData::from_observed(ObservedSession {
         transcript: &partial,
-        authority: "api.x.com",
+        authority,
         commitments: &commitments,
-        created_at,
+        created_at: 1_770_000_000,
     })
     .expect("the layouts produce an attestable session");
     (openings, data)
@@ -307,7 +296,7 @@ fn covered<'a>(recv: &'a [u8], c: &RangeCommitment) -> &'a [u8] {
 fn the_token_session_produces_a_record_the_verifier_accepts() {
     let sl = Layout::token_request(TOKEN_SENT);
     let rl = Layout::token_response(TOKEN_RECV).unwrap();
-    let (_, data) = record(TOKEN_SENT, TOKEN_RECV, &sl, &rl, 1_770_000_000);
+    let (_, data) = record(TOKEN_SENT, TOKEN_RECV, &sl, &rl, X_API);
 
     assert_tiles(&data.sent, data.sent_transcript_length, "token request");
     assert_tiles(
@@ -331,24 +320,11 @@ fn the_token_session_produces_a_record_the_verifier_accepts() {
     // REQ-COMMON-15A: the digest binding is the revealed `code_verifier`.
     assert_eq!(count(&data.sent.revealed[0].bytes, b"code_verifier="), 1);
 
-    // `requireFramedCommitment`: one commitment carries the framing, and the
-    // bearer is not readable anywhere.
-    let framed: Vec<_> = data
-        .received
-        .commitments
-        .iter()
-        .filter(|c| {
-            data.received.revealed.iter().any(|r| {
-                r.start + r.bytes.len() as u32 == c.start
-                    && r.bytes.ends_with(b"\"access_token\":\"")
-            })
-        })
-        .collect();
-    assert_eq!(
-        framed.len(),
-        1,
-        "exactly one commitment is framed as the bearer"
-    );
+    // `requireFramedCommitment`: exactly one commitment is framed as the
+    // bearer, it covers exactly the bearer, and the bearer is not readable
+    // anywhere.
+    let bearer = framed_string(&data.received, b"\"access_token\":\"");
+    assert_eq!(covered(TOKEN_RECV, bearer), b"SECRETBEARER");
     assert_eq!(count(&joined(&data.received), b"SECRETBEARER"), 0);
 }
 
@@ -356,7 +332,7 @@ fn the_token_session_produces_a_record_the_verifier_accepts() {
 fn the_identity_session_produces_a_record_the_verifier_accepts() {
     let sl = Layout::identity_request(ID_SENT).unwrap();
     let rl = Layout::identity_response(ID_RECV, &profiles::X.identity.unwrap()).unwrap();
-    let (_, data) = record(ID_SENT, ID_RECV, &sl, &rl, 1_770_000_000);
+    let (_, data) = record(ID_SENT, ID_RECV, &sl, &rl, X_API);
 
     assert_tiles(&data.sent, data.sent_transcript_length, "identity request");
     assert_tiles(
@@ -430,7 +406,7 @@ fn the_github_identity_session_frames_a_bare_integer_id() {
     let rl =
         Layout::identity_response(GITHUB_ID_RECV, &profiles::GITHUB.identity.unwrap())
             .unwrap();
-    let (_, data) = record(GITHUB_ID_SENT, GITHUB_ID_RECV, &sl, &rl, 1_770_000_000);
+    let (_, data) = record(GITHUB_ID_SENT, GITHUB_ID_RECV, &sl, &rl, GITHUB_API);
     assert_tiles(
         &data.received,
         data.recv_transcript_length,
@@ -451,12 +427,33 @@ fn the_github_identity_session_frames_a_bare_integer_id() {
     assert_eq!(covered(GITHUB_ID_RECV, handle), b"OctoCat");
 }
 
+/// `SHA256(value || blinder)`, with the `sha2` crate rather than tlsn's
+/// hasher.
+fn sha256(value: &[u8], blinder: &[u8]) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::new()
+        .chain_update(value)
+        .chain_update(blinder)
+        .finalize()
+        .into()
+}
+
+/// The commitment `block` carries over exactly `range`.
+fn signed(block: &DirectionBlock, range: &std::ops::Range<usize>) -> [u8; 32] {
+    block
+        .commitments
+        .iter()
+        .find(|c| c.start as usize == range.start && c.end as usize == range.end)
+        .expect("the record commits exactly the value")
+        .commitment
+}
+
 /// The witness the identity-link circuit opens, built from the prover's
 /// openings, against the commitments the verifier's record carries.
 fn assert_the_witness_opens_the_record(
     profile: &profiles::Profile,
-    token: &Notarized,
-    identity: &Notarized,
+    token: &HeldSession,
+    identity: &HeldSession,
 ) {
     for opening in token.openings.iter().chain(&identity.openings) {
         assert_eq!(
@@ -465,39 +462,48 @@ fn assert_the_witness_opens_the_record(
             "every blinder is 16 bytes"
         );
     }
-    let (token_openings, identity_openings) = (token.openings(), identity.openings());
-    let witness = IdentityLinkWitness::build(
-        profile,
-        token.proved(&token_openings),
-        identity.proved(&identity_openings),
-    )
-    .expect("the witness opens the record");
+    let witness = IdentityLinkWitness::build(profile, token.proved(), identity.proved())
+        .expect("the witness opens the record");
 
-    // Recomputed here, independently of the builder: SHA256(value || blinder)
-    // with the `sha2` crate equals the commitment tlsn's hasher produced and
-    // the verifier's record carries, over exactly the value's range.
-    let session = profile.identity.unwrap();
-    let members = IdentityMembers::in_response(identity.recv, &session).unwrap();
-    for (opened, range) in [
-        (witness.id(), members.id.value),
-        (witness.handle(), members.handle.value),
+    // Each of the four recomputed here, independently of the builder:
+    // SHA256(value || blinder) with the `sha2` crate equals the commitment
+    // tlsn's `hash_plaintext` produced and the verifier's record carries, over
+    // exactly the value's range.
+    let members =
+        IdentityMembers::in_response(&identity.recv, &profile.identity.unwrap()).unwrap();
+    let [identity_bearer] =
+        <[_; 1]>::try_from(Layout::identity_request(&identity.sent).unwrap().commit)
+            .expect("the identity request commits the bearer alone");
+    for (opened, bytes, block, range) in [
+        (
+            witness.token_bearer(),
+            &token.recv,
+            &token.record.received,
+            TokenMembers::in_response(&token.recv).unwrap().bearer.value,
+        ),
+        (
+            witness.identity_bearer(),
+            &identity.sent,
+            &identity.record.sent,
+            identity_bearer,
+        ),
+        (
+            witness.id(),
+            &identity.recv,
+            &identity.record.received,
+            members.id.value,
+        ),
+        (
+            witness.handle(),
+            &identity.recv,
+            &identity.record.received,
+            members.handle.value,
+        ),
     ] {
-        use sha2::Digest as _;
-        let signed = identity
-            .data
-            .received
-            .commitments
-            .iter()
-            .find(|c| c.start as usize == range.start && c.end as usize == range.end)
-            .expect("the record commits exactly the value");
-        let recomputed: [u8; 32] = sha2::Sha256::new()
-            .chain_update(&identity.recv[range.clone()])
-            .chain_update(opened.blinder())
-            .finalize()
-            .into();
-        assert_eq!(recomputed, signed.commitment);
-        assert_eq!(*opened.commitment(), signed.commitment);
-        assert_eq!(opened.value().as_bytes(), &identity.recv[range]);
+        let signed = signed(block, &range);
+        assert_eq!(sha256(&bytes[range.clone()], opened.blinder()), signed);
+        assert_eq!(*opened.commitment(), signed);
+        assert_eq!(opened.value().as_bytes(), &bytes[range]);
     }
     assert_eq!(
         witness.token_bearer().value(),
@@ -507,35 +513,47 @@ fn assert_the_witness_opens_the_record(
 
 #[test]
 fn the_identity_link_witness_opens_the_x_records() {
-    let token = Notarized::new(
+    let token = notarized(
         TOKEN_SENT,
         TOKEN_RECV,
         &Layout::token_request(TOKEN_SENT),
         &Layout::token_response(TOKEN_RECV).unwrap(),
+        X_API,
     );
-    let identity = Notarized::new(
+    let identity = notarized(
         ID_SENT,
         ID_RECV,
         &Layout::identity_request(ID_SENT).unwrap(),
         &Layout::identity_response(ID_RECV, &profiles::X.identity.unwrap()).unwrap(),
+        X_API,
     );
     assert_the_witness_opens_the_record(&profiles::X, &token, &identity);
 }
 
 #[test]
 fn the_identity_link_witness_opens_the_github_records() {
-    let token = Notarized::new(
+    let token = notarized(
         GITHUB_TOKEN_SENT,
         GITHUB_TOKEN_RECV,
         &Layout::token_request(GITHUB_TOKEN_SENT),
         &Layout::token_response(GITHUB_TOKEN_RECV).unwrap(),
+        GITHUB_WEB,
     );
-    let identity = Notarized::new(
+    let identity = notarized(
         GITHUB_ID_SENT,
         GITHUB_ID_RECV,
         &Layout::identity_request(GITHUB_ID_SENT).unwrap(),
         &Layout::identity_response(GITHUB_ID_RECV, &profiles::GITHUB.identity.unwrap())
             .unwrap(),
+        GITHUB_API,
+    );
+    assert_eq!(
+        token.record.authority_id,
+        AttestedData::authority_id_of(GITHUB_WEB)
+    );
+    assert_eq!(
+        identity.record.authority_id,
+        AttestedData::authority_id_of(GITHUB_API)
     );
     assert_the_witness_opens_the_record(&profiles::GITHUB, &token, &identity);
 }
@@ -558,11 +576,13 @@ fn both_sessions_encode_and_carry_their_own_lengths() {
             Layout::identity_response(ID_RECV, &profiles::X.identity.unwrap()).unwrap(),
         ),
     ] {
-        let (_, data) = record(sent, recv, &sl, &rl, 1_770_000_000);
+        let (_, data) = record(sent, recv, &sl, &rl, X_API);
         assert_eq!(data.sent_transcript_length as usize, sent.len());
         assert_eq!(data.recv_transcript_length as usize, recv.len());
         let encoded = data.encode().expect("encodes");
         assert!(encoded.len() > 48, "at least the header");
+        // A prover handed the notary's bytes reads back the record it signed.
+        assert_eq!(AttestedData::decode(&encoded).expect("decodes"), data);
         assert_ne!(data.digest().unwrap(), [0u8; 32]);
     }
 }
@@ -577,7 +597,7 @@ fn the_github_exchange_is_revealed_whole() {
 
     let sl = Layout::token_request(SENT);
     let rl = Layout::token_response(RECV).unwrap();
-    let (_, data) = record(SENT, RECV, &sl, &rl, 1_770_000_000);
+    let (_, data) = record(SENT, RECV, &sl, &rl, GITHUB_WEB);
 
     assert_tiles(&data.sent, data.sent_transcript_length, "github exchange");
     assert_eq!(data.sent.revealed.len(), 1);
