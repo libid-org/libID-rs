@@ -17,11 +17,7 @@
 
 use std::ops::Range;
 
-use crate::ranges::{
-    compute_field_snippet_range,
-    compute_id_snippet_range,
-    JsonMember,
-};
+use crate::ranges::JsonMember;
 
 /// What one direction of one session discloses.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,64 +284,89 @@ impl Layout {
         ))
     }
 
-    /// The identity response: the two identity members with their full delimiters,
-    /// and nothing else.
+    /// The identity response: the delimiters of the two identity members, and
+    /// nothing else. The id and handle VALUES are committed, each as its own
+    /// range, and so is everything around the members.
     ///
-    /// Each member is revealed whole -- delimiter, value and closing byte -- so the
-    /// verifier reads that field's value rather than a substring of a neighbouring
-    /// one, and so the match sits inside a single revealed run rather than being
-    /// spliced out of several. Everything between and around them is committed.
+    /// Each member's opening run (`"username":"`, `"id": `) and closing run
+    /// (`"`, or the `,`/`}` after a bare integer) are revealed, so the verifier
+    /// finds each value as the one commitment those anchors frame. The values
+    /// themselves never reach the chain: the identity-link circuit opens the
+    /// two commitments and outputs only their tagged hashes.
     ///
     /// # What committing the rest costs, and why it is taken
     ///
-    /// Every reader on the verifying side scans revealed bytes: the per-range field
-    /// read and the cross-range delimiter count alike. A commitment is invisible to
-    /// all of them. So a response that genuinely names an authoritative field twice
-    /// lets a prover commit the real member and reveal the one it composed, and
-    /// both checks then see exactly one. Uniqueness is a property of the document,
-    /// and this establishes it over a part.
+    /// Every reader on the verifying side scans revealed bytes. A commitment is
+    /// invisible to all of them. So a response that genuinely names an
+    /// authoritative field twice lets a prover commit the real member and frame
+    /// the one it chose, and the anchor count still sees one. Uniqueness is a
+    /// property of the document, and this establishes it over a part.
     ///
-    /// Reaching that needs the PLATFORM to emit the duplicate. ASM-PROV-06 assumes
-    /// it does not, and JSON escaping keeps a `","field":"` delimiter out of any
-    /// value the account controls -- a quote inside a string is written `\"`, which
-    /// does not match the template. A duplicate that reaches the REVEALED bytes is
-    /// still caught on chain, in either range layout.
+    /// Reaching that needs the PLATFORM to emit the duplicate. ASM-PROV-06
+    /// assumes it does not, and JSON escaping keeps a `"field":"` delimiter out
+    /// of any value the account controls. A duplicate that reaches the
+    /// REVEALED bytes is still caught on chain.
     ///
-    /// What the commitments buy is that the rest of the response never reaches the
-    /// chain. `GET /user` under an OAuth client holding a `user`-family scope
-    /// returns the account's plan, private-repository counts, disk usage and
-    /// two-factor state; revealing the response whole would publish all of it,
-    /// permanently, for every bind.
-    ///
-    /// `id_field` and `handle_field` are both bare `&str`, and a call that
-    /// transposes them still finds both members, still reveals both, and still
-    /// tiles -- it just names the handle as the account's immutable identifier.
-    /// Nothing downstream sees the swap: the layout is well formed and the
-    /// verifier reads what it was given, so the mistake surfaces on chain as an
-    /// offset rather than as a name. `IdShape` sitting between the two is luck,
-    /// not protection. Both names come from one profile, so keep them together at
-    /// the call site.
-    ///
-    /// The arguments are still taken and still checked. A response missing either
-    /// member is a failure now rather than at the verifier, where the reason would
-    /// be an offset rather than a name.
+    /// What the commitments buy is that the rest of the response never reaches
+    /// the chain. `GET /user` under an OAuth client holding a `user`-family
+    /// scope returns the account's plan, private-repository counts, disk usage
+    /// and two-factor state; revealing the response whole would publish all of
+    /// it, permanently, for every bind.
     pub fn identity_response(
         recv: &[u8],
         session: &IdentitySession,
     ) -> Result<Self, LayoutError> {
-        let (id_field, handle_field) = (session.id_field, session.handle_field);
-
-        // The bare-integer form takes its structural terminator with it, which is
-        // what proves the revealed digits are the whole number.
-        let quoted = session.id_shape == IdShape::JsonString;
-        let id = compute_id_snippet_range(recv, id_field, quoted)
-            .ok_or_else(|| LayoutError::MissingField(id_field.into()))?;
-        let handle = compute_field_snippet_range(recv, handle_field)
-            .ok_or_else(|| LayoutError::MissingField(handle_field.into()))?;
+        let IdentityMembers { id, handle } = IdentityMembers::in_response(recv, session)?;
 
         // JSON member order is not fixed; `Self::revealing` sorts, so this does
         // not assume one.
-        Ok(Self::revealing([id, handle], recv.len()))
+        Ok(Self::revealing(
+            [
+                id.member.start..id.value.start,
+                id.value.end..id.member.end,
+                handle.member.start..handle.value.start,
+                handle.value.end..handle.member.end,
+            ],
+            recv.len(),
+        ))
+    }
+}
+
+/// Where the two identity members sit in an identity response.
+///
+/// What [`Layout::identity_response`] reveals around, and what a prover opens
+/// for the circuit: `id.value` and `handle.value` are exactly the committed
+/// ranges the identity-link circuit's id and handle openings cover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentityMembers {
+    pub id: JsonMember,
+    pub handle: JsonMember,
+}
+
+impl IdentityMembers {
+    /// Both members of `session`'s profile in `recv`, offsets into `recv`.
+    ///
+    /// The field names come from one profile, so a transposed call cannot
+    /// happen here. An empty value is refused: it would leave the two anchors
+    /// adjacent and commit nothing, and the verifier would find no framed
+    /// commitment.
+    pub fn in_response(
+        recv: &[u8],
+        session: &IdentitySession,
+    ) -> Result<Self, LayoutError> {
+        let (id_field, handle_field) = (session.id_field, session.handle_field);
+        let missing = |field: &str| LayoutError::MissingField(field.into());
+
+        let id = match session.id_shape {
+            IdShape::JsonString => JsonMember::in_response(recv, id_field),
+            IdShape::JsonInteger => JsonMember::bare_in_response(recv, id_field),
+        }
+        .filter(|found| !found.value.is_empty())
+        .ok_or_else(|| missing(id_field))?;
+        let handle = JsonMember::in_response(recv, handle_field)
+            .filter(|found| !found.value.is_empty())
+            .ok_or_else(|| missing(handle_field))?;
+        Ok(Self { id, handle })
     }
 }
 
@@ -636,43 +657,77 @@ mod tests {
         );
     }
 
+    /// The revealed bytes, in offset order.
+    fn revealed<'a>(l: &Layout, recv: &'a [u8]) -> Vec<&'a [u8]> {
+        l.reveal.iter().map(|r| &recv[r.clone()]).collect()
+    }
+
+    /// The committed bytes, in offset order.
+    fn committed<'a>(l: &Layout, recv: &'a [u8]) -> Vec<&'a [u8]> {
+        l.commit.iter().map(|r| &recv[r.clone()]).collect()
+    }
+
     #[test]
-    fn the_identity_response_reveals_both_members_whole() {
-        let recv: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"data\":{\"id\":\"2244994945\",\"name\":\"Al\",\"username\":\"alice\"}}";
+    fn the_identity_response_reveals_only_the_anchors() {
+        let recv: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"data\":{\"id\":\"2244994945\",\"name\":\"Al\",\"username\":\"Alice_1\"}}";
         let l = Layout::identity_response(recv, &x_identity()).unwrap();
         assert!(tiles(&l, recv.len()));
-        assert_eq!(l.reveal.len(), 2);
-        // Whole members, delimiters included -- so the verifier reads the
-        // field's value and not a substring of the display name beside it.
         assert_eq!(
-            recv[l.reveal[0].clone()].to_vec(),
-            b"\"id\":\"2244994945\"".to_vec()
+            revealed(&l, recv),
+            [&b"\"id\":\""[..], b"\"", b"\"username\":\"", b"\""]
         );
+        // Each value is a commitment of its own, exactly the value: the
+        // circuit opens it, so a range carrying a quote would not open to the
+        // id or handle the platform returned. The handle is committed as the
+        // wire carries it; the circuit folds it, not the layout.
+        let hidden = committed(&l, recv);
+        assert!(hidden.contains(&&b"2244994945"[..]), "{hidden:?}");
+        assert!(hidden.contains(&&b"Alice_1"[..]), "{hidden:?}");
+    }
+
+    #[test]
+    fn the_members_name_exactly_the_committed_values() {
+        // What a prover hands the circuit is chosen by these ranges, and what
+        // the verifier frames is chosen by the layout. They are one scan.
+        let recv: &[u8] =
+            b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"7\",\"username\":\"alice\"}}";
+        let members = IdentityMembers::in_response(recv, &x_identity()).unwrap();
+        let l = Layout::identity_response(recv, &x_identity()).unwrap();
+        assert!(l.commit.contains(&members.id.value));
+        assert!(l.commit.contains(&members.handle.value));
+        assert_eq!(&recv[members.id.value.clone()], b"7");
+        assert_eq!(&recv[members.handle.value.clone()], b"alice");
+    }
+
+    #[test]
+    fn an_empty_value_is_refused() {
+        // Adjacent anchors commit nothing, and the verifier would find no
+        // framed commitment to open.
+        let recv: &[u8] =
+            b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"7\",\"username\":\"\"}}";
         assert_eq!(
-            recv[l.reveal[1].clone()].to_vec(),
-            b"\"username\":\"alice\"".to_vec()
+            Layout::identity_response(recv, &x_identity()),
+            Err(LayoutError::MissingField("username".into()))
         );
     }
 
     #[test]
-    fn the_github_identity_response_reveals_the_id_with_its_terminator() {
+    fn the_github_identity_response_reveals_the_id_terminator_and_commits_the_digits() {
         // GitHub's id is a BARE integer, so the two members are not the same
         // shape: `login` closes on a quote, `id` closes on the structural byte
-        // after the digits. That byte is revealed WITH them, because it is what
-        // proves they are the whole number and not a prefix of a longer one --
-        // `CeremonyFields.tryJsonInteger` pins it to `,` or `}` and no other.
+        // after the digits. That byte is revealed, because it is what proves
+        // the committed digits are the whole number and not a prefix of a
+        // longer one -- the profile pins it to `,` or `}` and no other.
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"login\":\"octocat\",\"id\":583231,\"node_id\":\"MDQ=\"}";
         let l = Layout::identity_response(recv, &github_identity()).unwrap();
         assert!(tiles(&l, recv.len()));
-        assert_eq!(l.reveal.len(), 2);
         assert_eq!(
-            recv[l.reveal[0].clone()].to_vec(),
-            b"\"login\":\"octocat\"".to_vec()
+            revealed(&l, recv),
+            [&b"\"login\":\""[..], b"\"", b"\"id\":", b","]
         );
-        assert_eq!(
-            recv[l.reveal[1].clone()].to_vec(),
-            b"\"id\":583231,".to_vec()
-        );
+        let hidden = committed(&l, recv);
+        assert!(hidden.contains(&&b"octocat"[..]), "{hidden:?}");
+        assert!(hidden.contains(&&b"583231"[..]), "{hidden:?}");
     }
 
     #[test]
@@ -684,10 +739,7 @@ mod tests {
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"login\":\"octocat\",\"id\":583231}";
         let l = Layout::identity_response(recv, &github_identity()).unwrap();
         assert!(tiles(&l, recv.len()));
-        assert_eq!(
-            recv[l.reveal[1].clone()].to_vec(),
-            b"\"id\":583231}".to_vec()
-        );
+        assert_eq!(revealed(&l, recv)[2..], [&b"\"id\":"[..], b"}"]);
     }
 
     #[test]
@@ -718,25 +770,20 @@ mod tests {
 
     #[test]
     fn a_response_that_names_the_handle_first_still_reveals_in_offset_order() {
-        // JSON member order is not the platform's promise, and the arguments
-        // are given id-first regardless. `Layout::revealing` is what reconciles
-        // the two: `complement` walks the reveals taking each as starting where
-        // the last one ended, so an unsorted pair reads as overlap and yields a
-        // complement that tiles nothing -- a layout the Platform Verifier
-        // refuses, with no honest ceremony able to produce an accepted one.
+        // JSON member order is not the platform's promise. `Layout::revealing`
+        // sorts: `complement` walks the reveals taking each as starting where
+        // the last one ended, so an unsorted list reads as overlap and yields a
+        // complement that tiles nothing.
         //
         // Every other fixture here happens to serialize `id` first, so this is
         // the one that exercises the sort.
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"username\":\"alice\",\"id\":\"7\"}";
         let l = Layout::identity_response(recv, &x_identity()).unwrap();
         assert!(tiles(&l, recv.len()));
-        assert_eq!(l.reveal.len(), 2);
-        // Offset order, which here is the OPPOSITE of the argument order.
         assert_eq!(
-            recv[l.reveal[0].clone()].to_vec(),
-            b"\"username\":\"alice\"".to_vec()
+            revealed(&l, recv),
+            [&b"\"username\":\""[..], b"\"", b"\"id\":\"", b"\""]
         );
-        assert_eq!(recv[l.reveal[1].clone()].to_vec(), b"\"id\":\"7\"".to_vec());
     }
 
     #[test]
@@ -847,10 +894,10 @@ mod tables {
             .iter()
             .map(|range| &recv.as_bytes()[range.clone()])
             .collect();
-        assert!(
-            revealed.contains(&&b"\"login\": \"octocat\""[..]),
-            "{revealed:?}"
+        assert_eq!(
+            revealed,
+            [&b"\"login\": \""[..], b"\"", b"\"id\": ", b","],
+            "the anchors carry the whitespace at its offsets"
         );
-        assert!(revealed.contains(&&b"\"id\": 583231,"[..]), "{revealed:?}");
     }
 }

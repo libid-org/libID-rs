@@ -227,6 +227,61 @@ impl JsonMember {
             value: at(raw.value.start)?..at(raw.value.end)?,
         })
     }
+
+    /// The bare (unquoted) integer member named `field` in `body`: `member`
+    /// runs from the key's opening `"` through the `,` or `}` that closes the
+    /// number, and `value` is the digits alone.
+    ///
+    /// Digits, then the byte that closes them -- the order `tryJsonInteger`
+    /// reads in. Scanning instead to the first `,` or `}` would accept
+    /// `"id":"7",`, a quoted value returned as though it were a number.
+    fn bare_in_body(body: &[u8], field: &str) -> Option<Self> {
+        let (start, digits) = key_and_value(body, field, false)?;
+        let rest = body.get(digits..)?;
+        let width = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        if width == 0 {
+            return None;
+        }
+        // A leading zero is noncanonical, and `0` alone is not a leading zero.
+        if width > 1 && rest[0] == b'0' {
+            return None;
+        }
+        let end = digits.checked_add(width)?;
+
+        // The terminator closes the member: it is what proves the digits are
+        // the whole number rather than a prefix of a longer one, and the
+        // profile fixes it as `,` or `}` and no other byte (REQ-PLAT-51). JSON
+        // whitespace may sit before it.
+        let term = skip_json_whitespace(body, end);
+        match body.get(term) {
+            Some(b',') | Some(b'}') => Some(Self {
+                member: start..term.checked_add(1)?,
+                value: digits..end,
+            }),
+            _ => None,
+        }
+    }
+
+    /// [`JsonMember::bare_in_body`] over a whole response, with offsets into
+    /// `recv` -- located and checked the way [`JsonMember::in_response`] is.
+    pub fn bare_in_response(recv: &[u8], field_name: &str) -> Option<Self> {
+        let body_range = find_response_body_range(recv)?;
+        let raw_body = &recv[body_range.clone()];
+        let decoded_body = extract_response_body(recv).ok()?;
+
+        let decoded = Self::bare_in_body(&decoded_body, field_name)?;
+        let raw = Self::bare_in_body(raw_body, field_name)?;
+        require_contiguous(
+            raw_body.get(raw.member.clone())?,
+            decoded_body.get(decoded.member)?,
+        )?;
+
+        let at = |offset: usize| body_range.start.checked_add(offset);
+        Some(Self {
+            member: at(raw.member.start)?..at(raw.member.end)?,
+            value: at(raw.value.start)?..at(raw.value.end)?,
+        })
+    }
 }
 
 /// The first occurrence of `needle`, or nothing.
@@ -294,32 +349,7 @@ fn require_contiguous(raw: &[u8], decoded: &[u8]) -> Option<()> {
 /// number; both terminators are included in the range (on-chain
 /// `tryJsonInteger` scans digits and stops at either).
 pub fn find_json_bare_snippet_range(body: &[u8], field: &str) -> Option<Range<usize>> {
-    let (start, digits) = key_and_value(body, field, false)?;
-
-    // Digits, then the byte that closes them -- the order `tryJsonInteger`
-    // reads in. Scanning instead to the first `,` or `}` would accept
-    // `"id":"7",`, a quoted value returned as though it were a number: the
-    // chain then refuses it as noncanonical, which is the same answer given
-    // where nobody can see the reason.
-    let rest = body.get(digits..)?;
-    let width = rest.iter().take_while(|b| b.is_ascii_digit()).count();
-    if width == 0 {
-        return None;
-    }
-    // A leading zero is noncanonical, and `0` alone is not a leading zero.
-    if width > 1 && rest[0] == b'0' {
-        return None;
-    }
-
-    // The terminator is revealed with the digits: it is what proves they are
-    // the whole number rather than a prefix of a longer one, and the profile
-    // fixes it as `,` or `}` and no other byte (REQ-PLAT-51). JSON
-    // whitespace may sit before it, and is revealed with it.
-    let term = skip_json_whitespace(body, digits.checked_add(width)?);
-    match body.get(term) {
-        Some(b',') | Some(b'}') => Some(start..term.checked_add(1)?),
-        _ => None,
-    }
+    JsonMember::bare_in_body(body, field).map(|found| found.member)
 }
 
 /// Like [`compute_field_snippet_range`] but returns the range covering the
@@ -345,23 +375,12 @@ pub fn compute_id_snippet_range(
     field_name: &str,
     quoted: bool,
 ) -> Option<Range<usize>> {
-    if quoted {
-        return compute_field_snippet_range(recv, field_name);
-    }
-    let body_range = find_response_body_range(recv)?;
-    let raw_body = &recv[body_range.clone()];
-    let decoded_body = extract_response_body(recv).ok()?;
-
-    let decoded_range = find_json_bare_snippet_range(&decoded_body, field_name)?;
-    let raw_snippet_range = find_json_bare_snippet_range(raw_body, field_name)?;
-    require_contiguous(
-        raw_body.get(raw_snippet_range.clone())?,
-        decoded_body.get(decoded_range)?,
-    )?;
-
-    let start = body_range.start.checked_add(raw_snippet_range.start)?;
-    let end = body_range.start.checked_add(raw_snippet_range.end)?;
-    Some(start..end)
+    let found = if quoted {
+        JsonMember::in_response(recv, field_name)
+    } else {
+        JsonMember::bare_in_response(recv, field_name)
+    };
+    found.map(|found| found.member)
 }
 
 #[cfg(test)]

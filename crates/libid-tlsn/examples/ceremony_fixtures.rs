@@ -182,6 +182,7 @@ fn blinder(session: &str, index: usize) -> [u8; 16] {
 struct Record {
     data: AttestedData,
     openings: Vec<serde_json::Value>,
+    raw_openings: Vec<Opening>,
 }
 
 /// `prover_generic`'s reveal and commit configuration, then the verifier's
@@ -237,6 +238,7 @@ fn build(
 
     let hasher = Sha256::default();
     let mut openings = Vec::new();
+    let mut raw_openings = Vec::new();
     let commitments: Vec<TranscriptCommitment> = ordered
         .iter()
         .enumerate()
@@ -253,6 +255,11 @@ fn build(
                 "ranges": ranges.iter().map(|r| json!([r.start, r.end])).collect::<Vec<_>>(),
                 "blinder": format!("0x{}", hex::encode(blinder)),
             }));
+            raw_openings.push(Opening {
+                sent: *direction == Direction::Sent,
+                ranges: ranges.clone(),
+                blinder: blinder.to_vec(),
+            });
             TranscriptCommitment::Hash(PlaintextHash {
                 direction: direction.to_owned(),
                 idx: idx.clone(),
@@ -271,7 +278,11 @@ fn build(
         created_at: T0,
     })
     .expect("record");
-    Record { data, openings }
+    Record {
+        data,
+        openings,
+        raw_openings,
+    }
 }
 
 fn session_json(
@@ -350,6 +361,7 @@ async fn main() {
         "application/json;charset=utf-8",
         r#"{"token_type":"bearer","expires_in":7200,"access_token":"VGhpcyBpcyBub3QgYSByZWFsIGJlYXJlcg","scope":"users.read tweet.read"}"#,
     );
+    let (token_sent, token_recv) = (sent.clone(), recv.clone());
     let token = build(
         "x token",
         &sent,
@@ -368,7 +380,9 @@ async fn main() {
 
     let recv = answer(
         "application/json;charset=utf-8",
-        r#"{"data":{"id":"2244994945","name":"Al Ice","username":"alice"}}"#,
+        // Mixed case, as X returns it: the commitment holds these bytes and
+        // the circuit folds them, so the fixture exercises the fold.
+        r#"{"data":{"id":"2244994945","name":"Al Ice","username":"Alice_1"}}"#,
     );
     let sent = exchange(
         request(
@@ -405,9 +419,26 @@ async fn main() {
         &sign,
     );
 
+    let witness = identity_link_witness(
+        "x",
+        &ProverSession {
+            sent: &token_sent,
+            recv: &token_recv,
+            openings: &token.raw_openings,
+            data: &token.data,
+        },
+        &ProverSession {
+            sent: &sent,
+            recv: &recv,
+            openings: &identity.raw_openings,
+            data: &identity.data,
+        },
+        &x.identity.unwrap(),
+    );
     let mut file = common("x");
     file["token"] = x_token;
     file["identity"] = x_identity;
+    file["identity_link_witness"] = witness;
     std::fs::write(
         out.join("x-ceremony-session.json"),
         serde_json::to_string_pretty(&file).unwrap() + "\n",
@@ -450,6 +481,7 @@ async fn main() {
         recv.clone(),
     )
     .await;
+    let (token_sent, token_recv) = (sent.clone(), recv.clone());
     let token = build(
         "github token",
         &sent,
@@ -473,7 +505,7 @@ async fn main() {
     // the fixture carries it.
     let recv = answer(
         "application/json; charset=utf-8",
-        "{\n  \"login\": \"octocat\",\n  \"id\": 583231,\n  \"node_id\": \"MDQ6VXNlcjU4MzIzMQ==\",\n  \"avatar_url\": \"https://avatars.githubusercontent.com/u/583231?v=4\",\n  \"type\": \"User\",\n  \"name\": \"The Octocat\"\n}",
+        "{\n  \"login\": \"OctoCat\",\n  \"id\": 583231,\n  \"node_id\": \"MDQ6VXNlcjU4MzIzMQ==\",\n  \"avatar_url\": \"https://avatars.githubusercontent.com/u/583231?v=4\",\n  \"type\": \"User\",\n  \"name\": \"The Octocat\"\n}",
     );
     // As `identityRequest` sets them, the browser's own user-agent among them.
     let sent = exchange(
@@ -513,9 +545,26 @@ async fn main() {
         &sign,
     );
 
+    let witness = identity_link_witness(
+        "github",
+        &ProverSession {
+            sent: &token_sent,
+            recv: &token_recv,
+            openings: &token.raw_openings,
+            data: &token.data,
+        },
+        &ProverSession {
+            sent: &sent,
+            recv: &recv,
+            openings: &identity.raw_openings,
+            data: &identity.data,
+        },
+        &github.identity.unwrap(),
+    );
     let mut file = common("github");
     file["token"] = github_token;
     file["identity"] = github_identity;
+    file["identity_link_witness"] = witness;
     std::fs::write(
         out.join("github-ceremony-session.json"),
         serde_json::to_string_pretty(&file).unwrap() + "\n",

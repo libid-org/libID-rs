@@ -29,6 +29,12 @@
 //!     --platform x --client-id ID --out <dir>
 //! ```
 //!
+//! It also writes the identity-link circuit's witness -- the bearer, the id
+//! and the handle with their blinders -- to
+//! `<platform>-identity-link-witness.secret.json` (or `--witness-out`),
+//! owner-only. That file holds the live bearer: prove from it, then delete it
+//! and revoke the token.
+//!
 //! `--redirect-uri` and `--listen` override the pair for an app registered
 //! elsewhere; they move together, since the code arrives on the address the
 //! platform redirects to.
@@ -73,7 +79,10 @@ use libid_transcript::{
     },
 };
 use serde_json::json;
-use tlsn::connection::ServerName;
+use tlsn::{
+    connection::ServerName,
+    transcript::Direction,
+};
 use tokio::{
     io::{
         AsyncReadExt,
@@ -95,6 +104,24 @@ struct Args {
     redirect_uri: String,
     listen: String,
     out: PathBuf,
+    witness_out: Option<PathBuf>,
+}
+
+/// Create `path` readable by its owner alone, before any byte lands in it.
+fn write_private(path: &std::path::Path, contents: &str) {
+    use std::{
+        io::Write as _,
+        os::unix::fs::OpenOptionsExt as _,
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
+    file.write_all(contents.as_bytes())
+        .unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
 }
 
 fn args() -> Args {
@@ -104,6 +131,7 @@ fn args() -> Args {
     let mut redirect_uri = DEFAULT_REDIRECT_URI.to_owned();
     let mut listen = DEFAULT_LISTEN.to_owned();
     let mut out = None;
+    let mut witness_out = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().unwrap_or_else(|| panic!("{flag} needs a value"));
@@ -114,6 +142,7 @@ fn args() -> Args {
             "--redirect-uri" => redirect_uri = value(),
             "--listen" => listen = value(),
             "--out" => out = Some(PathBuf::from(value())),
+            "--witness-out" => witness_out = Some(PathBuf::from(value())),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -124,6 +153,7 @@ fn args() -> Args {
         redirect_uri,
         listen,
         out: out.expect("--out <dir>"),
+        witness_out,
     }
 }
 
@@ -220,6 +250,23 @@ struct Session {
     created_at: u64,
     response_body: Vec<u8>,
     authority: String,
+    /// Both directions in full, as the prover saw them. Private: the witness
+    /// is built from them and they are never written to the fixture.
+    sent: Vec<u8>,
+    recv: Vec<u8>,
+    openings: Vec<Opening>,
+    data: AttestedData,
+}
+
+impl Session {
+    fn prover(&self) -> ProverSession<'_> {
+        ProverSession {
+            sent: &self.sent,
+            recv: &self.recv,
+            openings: &self.openings,
+            data: &self.data,
+        }
+    }
 }
 
 /// One notarized session: the prover against the real platform, the
@@ -236,10 +283,12 @@ async fn notarize(
 ) -> Result<Session, String> {
     let (to_verifier, from_prover) = tokio::io::duplex(1 << 16);
     let verifier = tokio::spawn(libid_tlsn::verifier(from_prover));
+    let mut transcript = (Vec::new(), Vec::new());
     let prover = libid_tlsn::prover_generic(
         to_verifier,
         request,
         |sent, recv| {
+            transcript = (sent.to_vec(), recv.to_vec());
             layouts(sent, recv).map_err(|e| libid_tlsn::Error::MpcTlsFailed {
                 detail: format!("layout: {e}"),
             })
@@ -281,12 +330,26 @@ async fn notarize(
         data.received.revealed.len(),
         data.received.commitments.len()
     );
+    let openings = prover
+        .commitment_openings
+        .iter()
+        .map(|o| Opening {
+            sent: o.direction == Direction::Sent,
+            ranges: o.ranges.clone(),
+            blinder: o.blinder.clone(),
+        })
+        .collect();
+    let (sent, recv) = transcript;
     Ok(Session {
         record,
         signature,
         created_at,
         response_body: prover.response_body,
         authority,
+        sent,
+        recv,
+        openings,
+        data,
     })
 }
 
@@ -351,7 +414,7 @@ async fn main() {
     let code = receive_code(&args.listen, &state).await;
     eprintln!("code received; running the token session");
 
-    let (token, identity) = match args.platform.as_str() {
+    let (token, identity, witness) = match args.platform.as_str() {
         "x" => {
             let profile = profiles::X;
             let body = token_body(
@@ -409,9 +472,16 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
+            let witness = identity_link_witness(
+                "x",
+                &token.prover(),
+                &identity.prover(),
+                &profile.identity.unwrap(),
+            );
             (
                 session_json("https://api.x.com/2/oauth2/token", &token),
                 session_json("https://api.x.com/2/users/me", &identity),
+                witness,
             )
         }
         _ => {
@@ -479,9 +549,16 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
+            let witness = identity_link_witness(
+                "github",
+                &token.prover(),
+                &identity.prover(),
+                &profile.identity.unwrap(),
+            );
             (
                 session_json("https://github.com/login/oauth/access_token", &token),
                 session_json("https://api.github.com/user", &identity),
+                witness,
             )
         }
     };
@@ -497,6 +574,24 @@ async fn main() {
     std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap() + "\n")
         .expect("write");
     println!("wrote {}", path.display());
+
+    // The witness holds the live bearer, so it is a secret: written owner-only
+    // beside nothing that gets committed, and never printed. Prove from it,
+    // then delete it and revoke the token.
+    let witness_path = args.witness_out.unwrap_or_else(|| {
+        args.out.join(format!(
+            "{}-identity-link-witness.secret.json",
+            args.platform
+        ))
+    });
+    write_private(
+        &witness_path,
+        &(serde_json::to_string_pretty(&witness).unwrap() + "\n"),
+    );
+    println!(
+        "wrote {} (owner-only; it holds the live bearer: prove, then delete it and revoke the token)",
+        witness_path.display()
+    );
 }
 
 /// The bearer out of the token response, which the identity session needs
