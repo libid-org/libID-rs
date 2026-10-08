@@ -35,13 +35,23 @@
 //! and the handle, each with its blinder -- to a NEW owner-only file in the
 //! system temporary directory, never beside the record:
 //! `$TMPDIR/libid-<platform>-identity-link-witness-<unix time>.secret.json`, or
-//! `--witness-out <path>`, whose name must end in `.secret.json` and which must
-//! not exist yet. It prints the path and never the contents.
+//! `--witness-out <path>`, whose name must end in `.secret.json`, which must
+//! not exist yet, and which, inside a git work tree, that tree must ignore
+//! (this repository ignores `*.secret.json`; libID-contracts and
+//! libID-circuits do not). It prints the path and never the contents. Unix
+//! only: elsewhere the destination is refused, since the file's mode is what
+//! keeps it private.
 //!
-//! That file is created before the consent URL is printed, so a destination
-//! that is refused (an existing path, a symlink, a directory, a missing
-//! parent, a name without the suffix) costs nothing. If the capture fails
-//! after that, the file is removed, and the error says so.
+//! That file is created, and the redirect listener bound, before the consent
+//! URL is printed, so a destination that is refused (an existing path, a
+//! symlink, a directory, a missing parent, a name without the suffix, a path
+//! git could commit) or a port already taken costs nothing. If the capture
+//! fails after that, the file is removed, and the error says so.
+//!
+//! Next, outside every repository, build the circuit's input from it with
+//! `libID-circuits/scripts/identity-link-witness.py <witness> --out
+//! <dir outside any repo>/<name>.toml` and run the nargo commands that script
+//! prints. Then delete the witness and the `.toml`, and revoke the token.
 //!
 //! That file is secret, and not only while the token lives. The bearer is a
 //! live credential until you revoke the token. The id and handle blinders are
@@ -51,8 +61,12 @@
 //! it and revoke the token; never copy it into a fixtures directory.
 //!
 //! The public record is written first. If the witness cannot be built, the
-//! error names which value failed and the record is kept. Any failure from
-//! the token session on says to revoke the token it may have issued.
+//! error names which value failed and the record is kept.
+//!
+//! From the moment the token request is sent, every way this process ends
+//! that it can observe says to revoke the token it may have issued: success,
+//! an error, a panic (a hook installed then), Ctrl-C, and on unix SIGTERM and
+//! SIGHUP. SIGKILL and a lost machine cannot be observed, and say nothing.
 //!
 //! `--redirect-uri` and `--listen` override the pair for an app registered
 //! elsewhere; they move together, since the code arrives on the address the
@@ -67,7 +81,12 @@ mod common;
 mod secret_file;
 
 use std::{
+    future::Future,
     path::PathBuf,
+    sync::atomic::{
+        AtomicBool,
+        Ordering,
+    },
     time::{
         SystemTime,
         UNIX_EPOCH,
@@ -211,15 +230,22 @@ fn now() -> u64 {
         .as_secs()
 }
 
-/// Wait for the browser's redirect on `listen` and return the code it carries.
-async fn receive_code(listen: &str, expected_state: &str) -> String {
-    let listener = TcpListener::bind(listen)
-        .await
-        .expect("bind the redirect listener");
+/// Wait for the browser's redirect on `listener` and return the code it
+/// carries.
+async fn receive_code(
+    listener: TcpListener,
+    expected_state: &str,
+) -> Result<String, String> {
     loop {
-        let (mut socket, _) = listener.accept().await.expect("accept");
+        let (mut socket, _) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("accepting the redirect: {e}"))?;
         let mut buf = vec![0u8; 8192];
-        let n = socket.read(&mut buf).await.expect("read");
+        let n = socket
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("reading the redirect: {e}"))?;
         let head = String::from_utf8_lossy(&buf[..n]).into_owned();
         let line = head.lines().next().unwrap_or("").to_owned();
         let target = line.split(' ').nth(1).unwrap_or("");
@@ -250,10 +276,10 @@ async fn receive_code(listen: &str, expected_state: &str) -> String {
         socket
             .write_all(response.as_bytes())
             .await
-            .expect("respond");
+            .map_err(|e| format!("answering the redirect: {e}"))?;
         socket.shutdown().await.ok();
-        if status.starts_with("200") {
-            return code.expect("code");
+        if let (Some(code), true) = (code, status.starts_with("200")) {
+            return Ok(code);
         }
         eprintln!("ignored a request without the expected code and state: {line}");
     }
@@ -379,6 +405,71 @@ fn request(
         .expect("valid request")
 }
 
+/// Set as the token request is sent: from then on the platform may have
+/// issued a live bearer, and every exit says to revoke it.
+static TOKEN_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Set once the revoke hint is printed, so a panic that also surfaces as an
+/// error prints it once.
+static HINT_PRINTED: AtomicBool = AtomicBool::new(false);
+
+fn print_revoke_hint(platform: &str) {
+    if TOKEN_REQUESTED.load(Ordering::SeqCst)
+        && !HINT_PRINTED.swap(true, Ordering::SeqCst)
+    {
+        eprintln!(
+            "The token session may have issued a live bearer for your account: revoke the app's \
+             access in {platform}'s authorized-apps settings."
+        );
+    }
+}
+
+/// Record that the token request is about to be sent, and from now on print
+/// the revoke hint on a panic too.
+fn token_requested(platform: &str) {
+    TOKEN_REQUESTED.store(true, Ordering::SeqCst);
+    let platform = platform.to_owned();
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        previous(info);
+        print_revoke_hint(&platform);
+    }));
+}
+
+/// What resolves when the capture is asked to stop: Ctrl-C, SIGTERM or
+/// SIGHUP. Registered before the capture starts, so a signal that cannot be
+/// listened for stops nothing half-way.
+#[cfg(unix)]
+fn stop_requested() -> Result<impl Future<Output = &'static str>, String> {
+    use tokio::signal::unix::{
+        signal,
+        SignalKind,
+    };
+    let listen = |kind: SignalKind, name: &str| {
+        signal(kind).map_err(|e| format!("listening for {name}: {e}"))
+    };
+    let mut interrupt = listen(SignalKind::interrupt(), "SIGINT")?;
+    let mut terminate = listen(SignalKind::terminate(), "SIGTERM")?;
+    let mut hangup = listen(SignalKind::hangup(), "SIGHUP")?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => "interrupted (SIGINT)",
+            _ = terminate.recv() => "terminated (SIGTERM)",
+            _ = hangup.recv() => "hung up (SIGHUP)",
+        }
+    })
+}
+
+/// What resolves when the capture is asked to stop: Ctrl-C.
+#[cfg(not(unix))]
+fn stop_requested() -> Result<impl Future<Output = &'static str>, String> {
+    Ok(async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => "interrupted (Ctrl-C)",
+            Err(_) => std::future::pending().await,
+        }
+    })
+}
+
 #[tokio::main]
 async fn main() {
     let args = args();
@@ -391,16 +482,19 @@ async fn main() {
     let witness_file = SecretFile::create(witness_path).unwrap_or_else(|e| {
         fail(format!(
             "the witness destination: {e}. Pass `--witness-out <dir>/<name>{SECRET_SUFFIX}` \
-             naming a new file in an existing directory"
+             naming a new file in an existing directory outside any git work tree"
         ))
     });
+    let stop = match stop_requested() {
+        Ok(stop) => stop,
+        Err(e) => fail(format!("{e}. {}", witness_file.discard())),
+    };
 
-    let mut token_requested = false;
-    // Raced against Ctrl-C, so an interrupted capture still removes the
+    // Raced against the stop signals, so a stopped capture still removes the
     // unwritten witness file below.
     let ran = tokio::select! {
-        ran = run(&args, &mut token_requested) => ran,
-        _ = tokio::signal::ctrl_c() => Err("interrupted".to_owned()),
+        ran = run(&args) => ran,
+        stopped = stop => Err(stopped.to_owned()),
     };
     let outcome = match ran {
         Ok((record, witness)) => {
@@ -416,29 +510,33 @@ async fn main() {
         Err(e) => Err(format!("{e}. {}", witness_file.discard())),
     };
     match outcome {
-        Ok(witness_path) => println!(
-            "wrote {} (owner-only, secret: the live bearer until you revoke the token, and \
-             blinders that link the commitments to the account for good. Prove, then delete it \
-             and revoke the token)",
-            witness_path.display()
-        ),
-        Err(e) if token_requested => fail(format!(
-            "{e}.\nThe token session may have issued a live bearer for your account: revoke \
-             the app's access in {}'s authorized-apps settings.",
-            args.platform
-        )),
-        Err(e) => fail(e),
+        Ok(witness_path) => {
+            let witness = witness_path.display();
+            println!(
+                "wrote {witness} (owner-only, secret: the live bearer until you revoke the \
+                 token, and blinders that link the commitments to the account for good).\n\
+                 Next, build the circuit's input outside every repository:\n  \
+                 libID-circuits/scripts/identity-link-witness.py {witness} \
+                 --out <dir outside any repo>/<name>.toml\n\
+                 and run the nargo commands it prints. Then delete {witness} and the .toml, and \
+                 revoke the app's access in {}'s authorized-apps settings.",
+                args.platform
+            );
+            HINT_PRINTED.store(true, Ordering::SeqCst);
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            print_revoke_hint(&args.platform);
+            std::process::exit(1)
+        }
     }
 }
 
 /// The consent, both sessions and the public record; the witness to write.
 ///
-/// Sets `token_requested` as the token session starts, so the caller can tell
-/// the user to revoke the token whatever fails from then on.
-async fn run(
-    args: &Args,
-    token_requested: &mut bool,
-) -> Result<(PathBuf, IdentityLinkWitness), String> {
+/// Calls [`token_requested`] as the token session starts, so every exit from
+/// then on tells the user to revoke the token.
+async fn run(args: &Args) -> Result<(PathBuf, IdentityLinkWitness), String> {
     std::fs::create_dir_all(&args.out)
         .map_err(|e| format!("the output directory {}: {e}", args.out.display()))?;
     let key = hex_to_signing_key(NOTARY_KEY).expect("notary key");
@@ -464,8 +562,17 @@ async fn run(
         form_encode(&args.redirect_uri),
         form_encode(scope),
     );
+    // Bound before the URL is printed: a consent given while nothing listens
+    // is a code lost.
+    let listener = TcpListener::bind(&args.listen).await.map_err(|e| {
+        format!(
+            "binding the redirect listener on {}: {e}. Stop whatever holds the port, or pass \
+             `--listen` and the matching `--redirect-uri` registered on the app",
+            args.listen
+        )
+    })?;
     eprintln!("\nOpen this URL, log in, and consent:\n\n{url}\n\nWaiting for the redirect on {} ...", args.listen);
-    let code = receive_code(&args.listen, &state).await;
+    let code = receive_code(listener, &state).await?;
     eprintln!("code received; running the token session");
 
     let (profile, endpoints, token, identity) = match args.platform.as_str() {
@@ -481,7 +588,7 @@ async fn run(
                 ],
             )
             .map_err(|e| e.to_string())?;
-            *token_requested = true;
+            token_requested(&args.platform);
             // As the browser's `buildTokenRequest` sets them.
             let token = notarize(
                 request(
@@ -552,7 +659,7 @@ async fn run(
                 ],
             )
             .map_err(|e| e.to_string())?;
-            *token_requested = true;
+            token_requested(&args.platform);
             // The body is the profile's `token_fields` in order; hyper appends
             // the length.
             let token = notarize(
@@ -662,9 +769,10 @@ fn bearer_of(token: &Session) -> Result<String, String> {
         .value;
     if recv[committed] != *bearer.as_bytes() {
         return Err(
-            "the bearer the token response decodes to is not the bytes its record commits \
-             (the response escapes a character in it), so the identity-link circuit could not \
-             match the identity session's bearer to it"
+            "the bearer the token response decodes to is not the bytes its record commits: \
+             either the response escapes a character in it, or it carries two `access_token` \
+             members (JSON keeps the last, the record commits the first). The identity-link \
+             circuit could not match the identity session's bearer to it"
                 .into(),
         );
     }
