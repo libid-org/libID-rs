@@ -35,8 +35,13 @@
 //! and the handle, each with its blinder -- to a NEW owner-only file in the
 //! system temporary directory, never beside the record:
 //! `$TMPDIR/libid-<platform>-identity-link-witness-<unix time>.secret.json`, or
-//! `--witness-out <path>`, which must not exist yet. It
-//! prints the path and never the contents.
+//! `--witness-out <path>`, whose name must end in `.secret.json` and which must
+//! not exist yet. It prints the path and never the contents.
+//!
+//! That file is created before the consent URL is printed, so a destination
+//! that is refused (an existing path, a symlink, a directory, a missing
+//! parent, a name without the suffix) costs nothing. If the capture fails
+//! after that, the file is removed, and the error says so.
 //!
 //! That file is secret, and not only while the token lives. The bearer is a
 //! live credential until you revoke the token. The id and handle blinders are
@@ -46,7 +51,8 @@
 //! it and revoke the token; never copy it into a fixtures directory.
 //!
 //! The public record is written first. If the witness cannot be built, the
-//! error names which value failed and the record is kept.
+//! error names which value failed and the record is kept. Any failure from
+//! the token session on says to revoke the token it may have issued.
 //!
 //! `--redirect-uri` and `--listen` override the pair for an app registered
 //! elsewhere; they move together, since the code arrives on the address the
@@ -57,6 +63,8 @@
 
 #[path = "ceremony/common.rs"]
 mod common;
+#[path = "ceremony/secret_file.rs"]
+mod secret_file;
 
 use std::{
     path::PathBuf,
@@ -88,11 +96,15 @@ use libid_transcript::{
         form_encode,
         profiles,
         token_body,
+        HeldSession,
         IdentityLinkWitness,
         Layout,
-        Opening,
-        ProvedSession,
+        TokenMembers,
     },
+};
+use secret_file::{
+    SecretFile,
+    SECRET_SUFFIX,
 };
 use serde_json::json;
 use tlsn::connection::ServerName;
@@ -120,31 +132,6 @@ struct Args {
     witness_out: Option<PathBuf>,
 }
 
-/// Create `path` as a new file readable by its owner alone, before any byte
-/// lands in it. An existing path, a symlink included, is refused rather than
-/// followed or truncated.
-fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
-    use std::{
-        io::Write as _,
-        os::unix::fs::OpenOptionsExt as _,
-    };
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::AlreadyExists => format!(
-                "{} already exists; the witness is only written to a new file. \
-                 Remove it, or pass `--witness-out <path>` naming one that does not exist",
-                path.display()
-            ),
-            _ => format!("{}: {e}", path.display()),
-        })?;
-    file.write_all(contents.as_bytes())
-        .map_err(|e| format!("{}: {e}", path.display()))
-}
-
 fn args() -> Args {
     let mut platform = None;
     let mut client_id = None;
@@ -167,8 +154,14 @@ fn args() -> Args {
             other => panic!("unknown flag {other}"),
         }
     }
+    let platform = platform.expect("--platform x|github");
+    match platform.as_str() {
+        "x" => {}
+        "github" => assert!(client_secret.is_some(), "--client-secret for github"),
+        other => panic!("unknown platform {other}"),
+    }
     Args {
-        platform: platform.expect("--platform x|github"),
+        platform,
         client_id: client_id.expect("--client-id"),
         client_secret,
         redirect_uri,
@@ -271,23 +264,10 @@ struct Session {
     created_at: u64,
     response_body: Vec<u8>,
     authority: String,
-    /// Both directions in full, as the prover saw them. Private: the witness
-    /// is built from them and they are never written to the fixture.
-    sent: Vec<u8>,
-    recv: Vec<u8>,
-    openings: Vec<Opening>,
-    data: AttestedData,
-}
-
-impl Session {
-    fn proved(&self) -> ProvedSession<'_> {
-        ProvedSession {
-            sent: &self.sent,
-            recv: &self.recv,
-            openings: &self.openings,
-            record: &self.data,
-        }
-    }
+    /// Both directions in full, the openings and the record, as the prover
+    /// holds them. Private: the witness is built from them and they are never
+    /// written to the fixture.
+    held: HeldSession,
 }
 
 /// One notarized session: the prover against the real platform, the
@@ -304,12 +284,10 @@ async fn notarize(
 ) -> Result<Session, String> {
     let (to_verifier, from_prover) = tokio::io::duplex(1 << 16);
     let verifier = tokio::spawn(libid_tlsn::verifier(from_prover));
-    let mut transcript = (Vec::new(), Vec::new());
     let prover = libid_tlsn::prover_generic(
         to_verifier,
         request,
         |sent, recv| {
-            transcript = (sent.to_vec(), recv.to_vec());
             layouts(sent, recv).map_err(|e| libid_tlsn::Error::MpcTlsFailed {
                 detail: format!("layout: {e}"),
             })
@@ -340,8 +318,10 @@ async fn notarize(
         commitments: &observed.transcript_commitments,
         created_at,
     })
-    .expect("record");
-    let record = data.encode().expect("encode");
+    .map_err(|e| format!("the attested-data record: {e}"))?;
+    let record = data
+        .encode()
+        .map_err(|e| format!("encoding the record: {e}"))?;
     let signature = sign(&keccak256(&record));
     eprintln!(
         "  record: {} bytes, sent {} revealed / {} committed, received {} revealed / {} committed, authority {authority}",
@@ -351,28 +331,28 @@ async fn notarize(
         data.received.revealed.len(),
         data.received.commitments.len()
     );
-    let openings = prover
-        .commitment_openings
-        .iter()
-        .map(Opening::from)
-        .collect();
-    let (sent, recv) = transcript;
     Ok(Session {
         record,
         signature,
         created_at,
-        response_body: prover.response_body,
         authority,
-        sent,
-        recv,
-        openings,
-        data,
+        held: prover.held_session(data),
+        response_body: prover.response_body,
     })
 }
 
 fn fail(message: String) -> ! {
     eprintln!("error: {message}");
     std::process::exit(1)
+}
+
+/// The default witness destination: a new name in the system temporary
+/// directory.
+fn default_witness_path(platform: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "libid-{platform}-identity-link-witness-{}{SECRET_SUFFIX}",
+        now()
+    ))
 }
 
 fn session_json(endpoint: &str, session: &Session) -> serde_json::Value {
@@ -403,7 +383,65 @@ fn request(
 #[tokio::main]
 async fn main() {
     let args = args();
-    std::fs::create_dir_all(&args.out).expect("output directory");
+    // Before the consent and both sessions, so a refused destination costs
+    // nothing.
+    let witness_path = args
+        .witness_out
+        .clone()
+        .unwrap_or_else(|| default_witness_path(&args.platform));
+    let witness_file = SecretFile::create(witness_path).unwrap_or_else(|e| {
+        fail(format!(
+            "the witness destination: {e}. Pass `--witness-out <dir>/<name>{SECRET_SUFFIX}` \
+             naming a new file in an existing directory"
+        ))
+    });
+
+    let mut token_requested = false;
+    // Raced against Ctrl-C, so an interrupted capture still removes the
+    // unwritten witness file below.
+    let ran = tokio::select! {
+        ran = run(&args, &mut token_requested) => ran,
+        _ = tokio::signal::ctrl_c() => Err("interrupted".to_owned()),
+    };
+    let outcome = match ran {
+        Ok((record, witness)) => {
+            let json =
+                serde_json::to_string_pretty(&witness).expect("witness JSON") + "\n";
+            witness_file.write(json.as_bytes()).map_err(|e| {
+                format!(
+                    "the witness: {e}. The public record {} is kept",
+                    record.display()
+                )
+            })
+        }
+        Err(e) => Err(format!("{e}. {}", witness_file.discard())),
+    };
+    match outcome {
+        Ok(witness_path) => println!(
+            "wrote {} (owner-only, secret: the live bearer until you revoke the token, and \
+             blinders that link the commitments to the account for good. Prove, then delete it \
+             and revoke the token)",
+            witness_path.display()
+        ),
+        Err(e) if token_requested => fail(format!(
+            "{e}.\nThe token session may have issued a live bearer for your account: revoke \
+             the app's access in {}'s authorized-apps settings.",
+            args.platform
+        )),
+        Err(e) => fail(e),
+    }
+}
+
+/// The consent, both sessions and the public record; the witness to write.
+///
+/// Sets `token_requested` as the token session starts, so the caller can tell
+/// the user to revoke the token whatever fails from then on.
+async fn run(
+    args: &Args,
+    token_requested: &mut bool,
+) -> Result<(PathBuf, IdentityLinkWitness), String> {
+    std::fs::create_dir_all(&args.out)
+        .map_err(|e| format!("the output directory {}: {e}", args.out.display()))?;
     let key = hex_to_signing_key(NOTARY_KEY).expect("notary key");
     let notary = hex0x(&pubkey_to_eth_address(key.verifying_key()));
     let sign = |digest: &[u8; 32]| sign_eth_claim(&key, digest).expect("sign");
@@ -418,7 +456,7 @@ async fn main() {
             "tweet.read users.read",
         ),
         "github" => ("https://github.com/login/oauth/authorize?", "read:user"),
-        other => panic!("unknown platform {other}"),
+        other => unreachable!("args() refuses platform {other}"),
     };
     let separator = if authorize.ends_with('?') { "" } else { "&" };
     let url = format!(
@@ -443,7 +481,8 @@ async fn main() {
                     ("code_verifier", &verifier),
                 ],
             )
-            .unwrap_or_else(|e| fail(e.to_string()));
+            .map_err(|e| e.to_string())?;
+            *token_requested = true;
             // As the browser's `buildTokenRequest` sets them.
             let token = notarize(
                 request(
@@ -463,9 +502,8 @@ async fn main() {
                 },
                 &sign,
             )
-            .await
-            .unwrap_or_else(|e| fail(e));
-            let bearer = bearer_of(&token.response_body).unwrap_or_else(|e| fail(e));
+            .await?;
+            let bearer = bearer_of(&token)?;
             eprintln!("token received; running the identity session");
             let identity = notarize(
                 request(
@@ -487,8 +525,7 @@ async fn main() {
                 },
                 &sign,
             )
-            .await
-            .unwrap_or_else(|e| fail(e));
+            .await?;
             (
                 profile,
                 (
@@ -504,7 +541,7 @@ async fn main() {
             let secret = args
                 .client_secret
                 .as_deref()
-                .expect("--client-secret for github");
+                .expect("args() requires --client-secret for github");
             let body = token_body(
                 &profile.token.unwrap(),
                 &[
@@ -515,7 +552,8 @@ async fn main() {
                     ("client_secret", secret),
                 ],
             )
-            .unwrap_or_else(|e| fail(e.to_string()));
+            .map_err(|e| e.to_string())?;
+            *token_requested = true;
             // The body is the profile's `token_fields` in order; hyper appends
             // the length.
             let token = notarize(
@@ -535,9 +573,8 @@ async fn main() {
                 },
                 &sign,
             )
-            .await
-            .unwrap_or_else(|e| fail(e));
-            let bearer = bearer_of(&token.response_body).unwrap_or_else(|e| fail(e));
+            .await?;
+            let bearer = bearer_of(&token)?;
             eprintln!("token received; running the identity session");
             // As the browser's `identityRequest` sets them.
             let identity = notarize(
@@ -562,8 +599,7 @@ async fn main() {
                 },
                 &sign,
             )
-            .await
-            .unwrap_or_else(|e| fail(e));
+            .await?;
             (
                 profile,
                 (
@@ -585,56 +621,51 @@ async fn main() {
         .out
         .join(format!("{}-ceremony-real.json", args.platform));
     std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap() + "\n")
-        .expect("write");
+        .map_err(|e| format!("writing {}: {e}", path.display()))?;
     println!("wrote {}", path.display());
 
     // Built after the record is on disk, so a witness that cannot be built
     // costs the witness and not the capture.
-    let witness = IdentityLinkWitness::build(&profile, token.proved(), identity.proved())
-        .unwrap_or_else(|e| {
-            fail(format!(
-                "identity-link witness: {e}. The public record {} is kept; no witness was written",
-                path.display()
-            ))
-        });
-    let witness_path = args.witness_out.unwrap_or_else(|| {
-        std::env::temp_dir().join(format!(
-            "libid-{}-identity-link-witness-{}.secret.json",
-            args.platform,
-            now()
-        ))
-    });
-    write_private(
-        &witness_path,
-        &(serde_json::to_string_pretty(&witness).expect("witness JSON") + "\n"),
-    )
-    .unwrap_or_else(|e| {
-        fail(format!(
-            "{e}. The public record {} is kept; no witness was written",
-            path.display()
-        ))
-    });
-    println!(
-        "wrote {} (owner-only, secret: the live bearer until you revoke the token, and \
-         blinders that link the commitments to the account for good. Prove, then delete it \
-         and revoke the token)",
-        witness_path.display()
-    );
+    let witness =
+        IdentityLinkWitness::build(&profile, token.held.proved(), identity.held.proved())
+            .map_err(|e| {
+                format!(
+                    "identity-link witness: {e}. The public record {} is kept",
+                    path.display()
+                )
+            })?;
+    Ok((path, witness))
 }
 
 /// The bearer out of the token response, which the identity session sends.
 ///
 /// The public record commits it and never carries it; the witness carries it.
-/// An error names what is wrong and never prints the response, which holds
-/// the bearer.
-fn bearer_of(body: &[u8]) -> Result<String, String> {
-    let json: serde_json::Value = serde_json::from_slice(body)
+/// The bearer JSON decodes must be the bytes the record commits, or the
+/// identity session would send a bearer the identity-link circuit cannot
+/// match to the token response's; that is refused here, before the identity
+/// session. An error names what is wrong and never prints the response, which
+/// holds the bearer.
+fn bearer_of(token: &Session) -> Result<String, String> {
+    let json: serde_json::Value = serde_json::from_slice(&token.response_body)
         .map_err(|_| "the token response is not JSON".to_owned())?;
-    let bearer = json["access_token"]
+    let bearer = json[TokenMembers::FIELD]
         .as_str()
         .ok_or("the token response has no string `access_token`")?;
     if !bearer.is_ascii() {
         return Err("the token response's `access_token` is not ASCII".into());
+    }
+    let recv = &token.held.recv;
+    let committed = TokenMembers::in_response(recv)
+        .map_err(|e| format!("the token response's committed bearer: {e}"))?
+        .bearer
+        .value;
+    if recv[committed] != *bearer.as_bytes() {
+        return Err(
+            "the bearer the token response decodes to is not the bytes its record commits \
+             (the response escapes a character in it), so the identity-link circuit could not \
+             match the identity session's bearer to it"
+                .into(),
+        );
     }
     Ok(bearer.to_owned())
 }
