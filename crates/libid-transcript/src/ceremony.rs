@@ -788,8 +788,8 @@ mod tests {
 
     #[test]
     fn the_display_name_beside_a_member_stays_committed() {
-        // The point of committing the rest: nothing but the two members and
-        // their delimiters reaches the chain.
+        // The point of committing the rest: nothing but the anchors around the
+        // two values reaches the chain.
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"id\":\"7\",\"name\":\"Al\",\"username\":\"alice\"}";
         let l = Layout::identity_response(recv, &x_identity()).unwrap();
         assert!(tiles(&l, recv.len()));
@@ -805,9 +805,10 @@ mod tests {
     /// The one duplicate this layout cannot defend against, recorded so the
     /// assumption is visible on the prover side too.
     ///
-    /// A response naming `username` twice lets the revealed range carry one
-    /// member while the other stays committed, invisible to every reader on
-    /// chain. Reaching it needs the platform to emit that document: ASM-PROV-06
+    /// A response naming `username` twice lets the revealed anchors frame one
+    /// member while the other stays committed, invisible to
+    /// `requireFramedCommitment`, which counts the prefix over revealed bytes
+    /// only. Reaching it needs the platform to emit that document: ASM-PROV-06
     /// assumes it does not, and JSON escaping keeps the delimiter out of any
     /// value the account controls. The layout picks the first match and does
     /// not detect the second -- stated here rather than left to be discovered.
@@ -827,6 +828,43 @@ mod tests {
             })
             .sum();
         assert_eq!(revealed, 1, "the second member is committed, not revealed");
+        // And the anchors frame the first one.
+        let members = IdentityMembers::in_response(recv, &x_identity()).unwrap();
+        assert_eq!(&recv[members.handle.value], b"victim");
+    }
+
+    #[test]
+    fn an_empty_quoted_id_is_refused() {
+        // `"id":""` would leave the two anchors adjacent: no commitment between
+        // them for `requireFramedCommitment` to frame or the circuit to open.
+        let recv: &[u8] =
+            b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"\",\"username\":\"alice\"}}";
+        assert_eq!(
+            Layout::identity_response(recv, &x_identity()),
+            Err(LayoutError::MissingField("id".into()))
+        );
+        assert_eq!(
+            IdentityMembers::in_response(recv, &x_identity()),
+            Err(LayoutError::MissingField("id".into()))
+        );
+    }
+
+    #[test]
+    fn a_github_id_s_value_is_the_digits_without_the_whitespace_before_the_comma() {
+        // Pretty-printed, with whitespace between the digits and `,`: the
+        // committed value is the digits, and the whitespace is revealed with
+        // the terminator, where `_terminatedAt` skips it.
+        let recv: &[u8] =
+            b"HTTP/1.1 200 OK\r\n\r\n{\n  \"login\": \"octocat\",\n  \"id\": 583231 ,\n  \"x\": 1\n}";
+        let members = IdentityMembers::in_response(recv, &github_identity()).unwrap();
+        assert_eq!(&recv[members.id.value.clone()], b"583231");
+        let l = Layout::identity_response(recv, &github_identity()).unwrap();
+        assert!(tiles(&l, recv.len()));
+        assert!(l.commit.contains(&members.id.value));
+        assert!(l
+            .reveal
+            .contains(&(members.id.value.end..members.id.member.end)));
+        assert_eq!(&recv[members.id.value.end..members.id.member.end], b" ,");
     }
 
     #[test]

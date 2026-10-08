@@ -6,7 +6,7 @@
 //! driver that produces these transcripts lives in `libid-tlsn`.
 //!
 //! * [`ranges`] — HTTP/JSON byte-range math for selective disclosure: locate
-//!   headers, response bodies (chunked or not), and JSON field/snippet ranges
+//!   headers, response bodies (chunked or not), and JSON members
 //!   in a raw TLS transcript, and map them back to absolute transcript
 //!   offsets, which are what a reveal range and a commitment are stated in.
 //! * [`wire`] — the length-prefixed JSON protocol the notary and prover speak
@@ -25,13 +25,9 @@ pub use attestation::{
 };
 
 pub use ranges::{
-    compute_field_snippet_range,
-    compute_id_snippet_range,
     extract_header,
     extract_response_body,
     find_header_range,
-    find_json_bare_snippet_range,
-    find_json_snippet_range,
     find_request_line_range,
     find_response_body_range,
     JsonMember,
