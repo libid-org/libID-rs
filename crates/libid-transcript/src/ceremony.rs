@@ -41,7 +41,7 @@ pub struct Layout {
     pub commit: Vec<Range<usize>>,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LayoutError {
     #[error("the request has no `{0}` header, so the layout has nothing to anchor on")]
     MissingHeader(&'static str),
@@ -51,6 +51,13 @@ pub enum LayoutError {
     EmptyField(String),
     #[error("the transcript has no head boundary, so its body cannot be located")]
     NoHeadBoundary,
+    #[error("the request's `{0}` header has an empty value, so there is no credential to commit")]
+    EmptyHeader(&'static str),
+    #[error(
+        "the request is not one HTTP request: it holds {heads} `\\r\\n\\r\\n` and {trailing} bytes \
+         after the first, where the verifier takes exactly one, ending the transcript"
+    )]
+    NotOneRequest { heads: usize, trailing: usize },
 }
 
 /// Why a token body could not be serialized from a profile's field list.
@@ -255,22 +262,13 @@ impl Layout {
     ///
     /// The two revealed runs plus the committed one account for the request exactly,
     /// which is what REQ-COMMON-35 demands and what leaves the committed range as
-    /// the only region the verifier cannot read.
+    /// the only region the verifier cannot read. The bearer is the one
+    /// [`BearerHeader::in_request`] finds, which also refuses a direction that is
+    /// not exactly one request.
     pub fn identity_request(sent: &[u8]) -> Result<Self, LayoutError> {
-        const PREFIX: &[u8] = b"\r\nauthorization: Bearer ";
-        let prefix_at = sent
-            .windows(PREFIX.len())
-            .position(|w| w == PREFIX)
-            .ok_or(LayoutError::MissingHeader("authorization"))?;
-        let value_start = prefix_at + PREFIX.len();
-        let value_end = value_start
-            + sent[value_start..]
-                .windows(2)
-                .position(|w| w == b"\r\n")
-                .ok_or(LayoutError::MissingHeader("authorization"))?;
-
+        let BearerHeader { value } = BearerHeader::in_request(sent)?;
         Ok(Self::revealing(
-            [0..value_start, value_end..sent.len()],
+            [0..value.start, value.end..sent.len()],
             sent.len(),
         ))
     }
@@ -353,6 +351,62 @@ impl TokenMembers {
     pub fn in_response(recv: &[u8]) -> Result<Self, LayoutError> {
         let bearer = nonempty(JsonMember::in_response(recv, Self::FIELD), Self::FIELD)?;
         Ok(Self { bearer })
+    }
+}
+
+/// Where the bearer sits in an identity request.
+///
+/// What [`Layout::identity_request`] commits, and what a prover opens for the
+/// circuit: `value` is exactly the committed range the identity-link
+/// circuit's identity-bearer opening covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BearerHeader {
+    /// The bearer alone, from after [`BearerHeader::PREFIX`] to the CRLF that
+    /// ends its line.
+    pub value: Range<usize>,
+}
+
+impl BearerHeader {
+    /// The bytes before the bearer: the contract's `BEARER_PREFIX`, the
+    /// header line as hyper writes it.
+    pub const PREFIX: &'static [u8] = b"\r\nauthorization: Bearer ";
+
+    /// The bearer in `sent`, offsets into `sent`.
+    ///
+    /// `sent` must be exactly one request with no body: one `\r\n\r\n`, and
+    /// it ends the direction. The Platform Verifier refuses an identity
+    /// session whose sent direction holds anything after the request, so a
+    /// direction that would be refused there is refused here, before a
+    /// session is notarized over it. An empty bearer is refused too: it would
+    /// commit nothing, and the verifier takes exactly one commitment.
+    pub fn in_request(sent: &[u8]) -> Result<Self, LayoutError> {
+        const HEAD_END: &[u8] = b"\r\n\r\n";
+        let heads = sent
+            .windows(HEAD_END.len())
+            .filter(|w| *w == HEAD_END)
+            .count();
+        if heads != 1 || !sent.ends_with(HEAD_END) {
+            let trailing = sent
+                .windows(HEAD_END.len())
+                .position(|w| w == HEAD_END)
+                .map_or(0, |at| sent.len() - at - HEAD_END.len());
+            return Err(LayoutError::NotOneRequest { heads, trailing });
+        }
+        let missing = LayoutError::MissingHeader("authorization");
+        let start = sent
+            .windows(Self::PREFIX.len())
+            .position(|w| w == Self::PREFIX)
+            .ok_or(missing.clone())?
+            + Self::PREFIX.len();
+        let end = start
+            + sent[start..]
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .ok_or(missing)?;
+        if start == end {
+            return Err(LayoutError::EmptyHeader("authorization"));
+        }
+        Ok(Self { value: start..end })
     }
 }
 
@@ -684,6 +738,62 @@ mod tests {
         let before = &sent[..l.commit[0].start];
         assert!(before.ends_with(b"\r\nauthorization: Bearer "));
         assert!(sent[l.commit[0].end..].starts_with(b"\r\n"));
+    }
+
+    #[test]
+    fn the_identity_request_is_one_request_ending_the_direction() {
+        const ONE: &[u8] =
+            b"GET /2/users/me HTTP/1.1\r\nauthorization: Bearer T\r\nconnection: close\r\n\r\n";
+        assert_eq!(
+            BearerHeader::in_request(ONE).map(|b| ONE[b.value].to_vec()),
+            Ok(b"T".to_vec())
+        );
+        let trailing = [ONE, b"x"].concat();
+        assert_eq!(
+            Layout::identity_request(&trailing),
+            Err(LayoutError::NotOneRequest {
+                heads: 1,
+                trailing: 1
+            })
+        );
+        // A second request after the first: the platform would answer both,
+        // and the verifier reads one.
+        let two = [ONE, ONE].concat();
+        assert_eq!(
+            BearerHeader::in_request(&two),
+            Err(LayoutError::NotOneRequest {
+                heads: 2,
+                trailing: ONE.len()
+            })
+        );
+        let unterminated = &ONE[..ONE.len() - 2];
+        assert_eq!(
+            Layout::identity_request(unterminated),
+            Err(LayoutError::NotOneRequest {
+                heads: 0,
+                trailing: 0
+            })
+        );
+    }
+
+    #[test]
+    fn an_empty_bearer_header_is_refused() {
+        assert_eq!(
+            Layout::identity_request(
+                b"GET /2/users/me HTTP/1.1\r\nauthorization: Bearer \r\nhost: api.x.com\r\n\r\n"
+            ),
+            Err(LayoutError::EmptyHeader("authorization"))
+        );
+    }
+
+    #[test]
+    fn the_bearer_header_is_what_the_layout_commits() {
+        let sent: &[u8] = b"GET /user HTTP/1.1\r\nauthorization: Bearer gho_X\r\n\r\n";
+        let bearer = BearerHeader::in_request(sent).unwrap();
+        assert_eq!(
+            Layout::identity_request(sent).unwrap().commit,
+            [bearer.value]
+        );
     }
 
     #[test]

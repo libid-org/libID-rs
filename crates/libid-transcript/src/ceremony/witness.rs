@@ -24,8 +24,8 @@ use serde::{
 use sha2::Digest as _;
 
 use super::{
+    BearerHeader,
     IdentityMembers,
-    Layout,
     LayoutError,
     Profile,
     TokenMembers,
@@ -142,7 +142,8 @@ pub enum WitnessError {
         layout: LayoutError,
     },
     #[error(
-        "the identity request commits {0} ranges where the layout commits one, the bearer"
+        "the identity request's record carries {0} commitments where the verifier takes one, \
+         the bearer"
     )]
     IdentityRequestShape(usize),
     #[error("no opening covers exactly the {0}'s range")]
@@ -237,8 +238,9 @@ impl IdentityLinkWitness {
     /// exactly one committed range with a [`BLINDER_LEN`]-byte blinder. Its
     /// commitment is recomputed as `SHA256(value || blinder)` and must equal
     /// the one the notary signed over that range, so a witness this returns
-    /// opens the record it came from. The two bearers must be the same bytes:
-    /// that is the relation the circuit proves.
+    /// opens the record it came from. The identity request's record must carry
+    /// that one commitment and no other. The two bearers must be the same
+    /// bytes: that is the relation the circuit proves.
     pub fn build(
         profile: &Profile,
         token: ProvedSession<'_>,
@@ -255,14 +257,19 @@ impl IdentityLinkWitness {
             })?
             .bearer
             .value;
-        let identity_bearer = Layout::identity_request(identity.sent)
+        let identity_bearer = BearerHeader::in_request(identity.sent)
             .map_err(|layout| WitnessError::Missing {
                 value: WitnessValue::IdentityBearer,
                 layout,
             })?
-            .commit;
-        let [identity_bearer] = <[Range<usize>; 1]>::try_from(identity_bearer)
-            .map_err(|ranges| WitnessError::IdentityRequestShape(ranges.len()))?;
+            .value;
+        // `requireBearerHeaderRequest` takes exactly one commitment in the
+        // identity request, the bearer's; a record with another would be
+        // refused on chain whatever this opens.
+        let signed = identity.record.sent.commitments.len();
+        if signed != 1 {
+            return Err(WitnessError::IdentityRequestShape(signed));
+        }
         let members =
             IdentityMembers::in_response(identity.recv, &session).map_err(|layout| {
                 let value = match &layout {
@@ -392,9 +399,12 @@ fn hex0x<S: Serializer>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attestation::{
-        DirectionBlock,
-        RangeCommitment,
+    use crate::{
+        attestation::{
+            DirectionBlock,
+            RangeCommitment,
+        },
+        ceremony::Layout,
     };
 
     const TOKEN_SENT: &[u8] = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\n\r\ngrant_type=authorization_code";
@@ -558,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn a_commitment_the_record_does_not_carry_is_refused() {
+    fn a_signed_commitment_the_opening_does_not_hash_to_is_refused() {
         let (token, mut identity) = x();
         let members = IdentityMembers::in_response(
             X_RECV,
@@ -581,6 +591,119 @@ mod tests {
             ),
             Err(WitnessError::CommitmentMismatch(WitnessValue::Handle))
         );
+    }
+
+    fn build_x(
+        token: &HeldSession,
+        identity: &HeldSession,
+    ) -> Result<IdentityLinkWitness, WitnessError> {
+        IdentityLinkWitness::build(
+            &super::super::profiles::X,
+            token.proved(),
+            identity.proved(),
+        )
+    }
+
+    #[test]
+    fn a_value_the_record_does_not_commit_is_refused() {
+        // The opening is still held; the signed record has no commitment over
+        // the handle's range.
+        let (token, mut identity) = x();
+        let handle = IdentityMembers::in_response(
+            X_RECV,
+            &super::super::profiles::X.identity.unwrap(),
+        )
+        .unwrap()
+        .handle
+        .value;
+        identity
+            .record
+            .received
+            .commitments
+            .retain(|c| c.start as usize != handle.start);
+        assert_eq!(
+            build_x(&token, &identity),
+            Err(WitnessError::NotInRecord(WitnessValue::Handle))
+        );
+
+        // The identity request's one commitment, over another range.
+        let (token, mut identity) = x();
+        identity.record.sent.commitments[0].start += 1;
+        assert_eq!(
+            build_x(&token, &identity),
+            Err(WitnessError::NotInRecord(WitnessValue::IdentityBearer))
+        );
+    }
+
+    #[test]
+    fn an_identity_request_record_with_a_second_commitment_is_refused() {
+        let (token, mut identity) = x();
+        let extra = identity.record.sent.commitments[0].clone();
+        identity.record.sent.commitments.push(extra);
+        let err = build_x(&token, &identity).unwrap_err();
+        assert_eq!(err, WitnessError::IdentityRequestShape(2));
+        assert_eq!(
+            err.to_string(),
+            "the identity request's record carries 2 commitments where the verifier takes one, \
+             the bearer"
+        );
+        identity.record.sent.commitments.clear();
+        assert_eq!(
+            build_x(&token, &identity),
+            Err(WitnessError::IdentityRequestShape(0))
+        );
+    }
+
+    #[test]
+    fn an_identity_request_that_is_not_one_request_is_refused() {
+        let (token, mut identity) = x();
+        identity.sent.extend_from_slice(b"GET / HTTP/1.1\r\n\r\n");
+        assert_eq!(
+            build_x(&token, &identity),
+            Err(WitnessError::Missing {
+                value: WitnessValue::IdentityBearer,
+                layout: LayoutError::NotOneRequest {
+                    heads: 2,
+                    trailing: 18
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn a_missing_or_empty_member_is_named_by_which_value_it_is() {
+        let (token, _) = x();
+        let identity = |recv: &[u8]| HeldSession {
+            recv: recv.to_vec(),
+            ..x().1
+        };
+        for (recv, value, layout) in [
+            (
+                &b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"7\",\"name\":\"Al\"}}"[..],
+                WitnessValue::Handle,
+                LayoutError::MissingField("username".into()),
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"7\",\"username\":\"\"}}",
+                WitnessValue::Handle,
+                LayoutError::EmptyField("username".into()),
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"username\":\"Alice_1\"}}",
+                WitnessValue::Id,
+                LayoutError::MissingField("id".into()),
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"\",\"username\":\"Alice_1\"}}",
+                WitnessValue::Id,
+                LayoutError::EmptyField("id".into()),
+            ),
+        ] {
+            assert_eq!(
+                build_x(&token, &identity(recv)),
+                Err(WitnessError::Missing { value, layout })
+            );
+        }
     }
 
     #[test]
