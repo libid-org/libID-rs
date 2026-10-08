@@ -11,6 +11,7 @@ categories = ["cryptography", "parser-implementations"]
 
 [dependencies]
 bincode.workspace = true
+hex.workspace = true
 libid-crypto.workspace = true
 httparse.workspace = true
 libid-profiles.workspace = true
@@ -21,7 +22,6 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 
 [dev-dependencies]
-hex.workspace = true
 # The generated platform names, to check the profile table against.
 libid-identity.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "io-util"] }

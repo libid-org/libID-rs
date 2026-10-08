@@ -28,11 +28,9 @@ use super::{
     Layout,
     LayoutError,
     Profile,
+    TokenMembers,
 };
-use crate::{
-    attestation::AttestedData,
-    ranges::JsonMember,
-};
+use crate::attestation::AttestedData;
 
 /// The width of a commitment blinder, as the commitment scheme fixes it.
 pub const BLINDER_LEN: usize = 16;
@@ -87,7 +85,30 @@ pub struct ProvedSession<'a> {
     pub sent: &'a [u8],
     pub recv: &'a [u8],
     pub openings: &'a [Opening],
+    /// The decoded record. A prover that received the record as the notary's
+    /// encoded bytes (`AttestationWire::attested_data`) decodes them with
+    /// [`AttestedData::decode`].
     pub record: &'a AttestedData,
+}
+
+/// A [`ProvedSession`] that owns its parts.
+#[derive(Clone)]
+pub struct HeldSession {
+    pub sent: Vec<u8>,
+    pub recv: Vec<u8>,
+    pub openings: Vec<Opening>,
+    pub record: AttestedData,
+}
+
+impl HeldSession {
+    pub fn proved(&self) -> ProvedSession<'_> {
+        ProvedSession {
+            sent: &self.sent,
+            recv: &self.recv,
+            openings: &self.openings,
+            record: &self.record,
+        }
+    }
 }
 
 /// Which of the four opened values a [`WitnessError`] is about.
@@ -115,10 +136,10 @@ impl std::fmt::Display for WitnessValue {
 pub enum WitnessError {
     #[error("the `{0}` profile notarizes no token and identity session pair")]
     NoSessions(&'static str),
-    #[error("the {value} cannot be located: {source}")]
+    #[error("the {value} cannot be located: {layout}")]
     Missing {
         value: WitnessValue,
-        source: LayoutError,
+        layout: LayoutError,
     },
     #[error(
         "the identity request commits {0} ranges where the layout commits one, the bearer"
@@ -168,7 +189,10 @@ impl OpenedValue {
 impl std::fmt::Debug for OpenedValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpenedValue")
-            .field("commitment", &Hex(&self.commitment))
+            .field(
+                "commitment",
+                &format_args!("0x{}", hex::encode(self.commitment)),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -224,29 +248,32 @@ impl IdentityLinkWitness {
             return Err(WitnessError::NoSessions(profile.platform));
         };
 
-        let token_bearer = JsonMember::in_response(token.recv, "access_token")
-            .ok_or(WitnessError::Missing {
+        let token_bearer = TokenMembers::in_response(token.recv)
+            .map_err(|layout| WitnessError::Missing {
                 value: WitnessValue::TokenBearer,
-                source: LayoutError::MissingField("access_token".into()),
+                layout,
             })?
+            .bearer
             .value;
         let identity_bearer = Layout::identity_request(identity.sent)
-            .map_err(|source| WitnessError::Missing {
+            .map_err(|layout| WitnessError::Missing {
                 value: WitnessValue::IdentityBearer,
-                source,
+                layout,
             })?
             .commit;
         let [identity_bearer] = <[Range<usize>; 1]>::try_from(identity_bearer)
             .map_err(|ranges| WitnessError::IdentityRequestShape(ranges.len()))?;
         let members =
-            IdentityMembers::in_response(identity.recv, &session).map_err(|source| {
-                let value = match &source {
-                    LayoutError::MissingField(field) if field == session.handle_field => {
+            IdentityMembers::in_response(identity.recv, &session).map_err(|layout| {
+                let value = match &layout {
+                    LayoutError::MissingField(field) | LayoutError::EmptyField(field)
+                        if field == session.handle_field =>
+                    {
                         WitnessValue::Handle
                     }
                     _ => WitnessValue::Id,
                 };
-                WitnessError::Missing { value, source }
+                WitnessError::Missing { value, layout }
             })?;
 
         let token_bearer = open(
@@ -354,26 +381,12 @@ fn open(
     })
 }
 
+/// `0x` and lowercase hex, as the circuit's witness script reads it.
 fn hex0x<S: Serializer>(
     bytes: impl AsRef<[u8]>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    serializer.collect_str(&format_args!("0x{}", Hex(bytes.as_ref())))
-}
-
-/// Lowercase hex, no prefix.
-struct Hex<'a>(&'a [u8]);
-
-impl std::fmt::Display for Hex<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
-    }
-}
-
-impl std::fmt::Debug for Hex<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "0x{self}")
-    }
+    serializer.serialize_str(&format!("0x{}", hex::encode(bytes)))
 }
 
 #[cfg(test)]
@@ -401,85 +414,66 @@ mod tests {
     /// A session as its prover would hold it: every committed range opened
     /// with blinder `[seed + i; 16]`, and a record carrying SHA256(range ||
     /// blinder) for each.
-    struct Held {
-        sent: Vec<u8>,
-        recv: Vec<u8>,
-        openings: Vec<Opening>,
-        record: AttestedData,
-    }
-
-    impl Held {
-        fn new(sent: &[u8], recv: &[u8], sl: &Layout, rl: &Layout, seed: u8) -> Self {
-            let mut openings = Vec::new();
-            let mut block = |direction, bytes: &[u8], commit: &[Range<usize>]| {
-                let mut out = DirectionBlock::default();
-                for range in commit {
-                    let blinder =
-                        vec![seed.wrapping_add(openings.len() as u8); BLINDER_LEN];
-                    out.commitments.push(RangeCommitment {
-                        start: range.start as u32,
-                        end: range.end as u32,
-                        commitment: sha256(&bytes[range.clone()], &blinder),
-                    });
-                    openings.push(Opening {
-                        direction,
-                        ranges: vec![range.clone()],
-                        blinder,
-                    });
-                }
-                out
-            };
-            let sent_block = block(Direction::Sent, sent, &sl.commit);
-            let recv_block = block(Direction::Received, recv, &rl.commit);
-            Self {
-                sent: sent.to_vec(),
-                recv: recv.to_vec(),
-                openings,
-                record: AttestedData {
-                    authority_id: [0; 32],
-                    created_at: 0,
-                    sent_transcript_length: sent.len() as u32,
-                    recv_transcript_length: recv.len() as u32,
-                    sent: sent_block,
-                    received: recv_block,
-                },
+    fn held(sent: &[u8], recv: &[u8], sl: &Layout, rl: &Layout, seed: u8) -> HeldSession {
+        let mut openings = Vec::new();
+        let mut block = |direction, bytes: &[u8], commit: &[Range<usize>]| {
+            let mut out = DirectionBlock::default();
+            for range in commit {
+                let blinder = vec![seed.wrapping_add(openings.len() as u8); BLINDER_LEN];
+                out.commitments.push(RangeCommitment {
+                    start: range.start as u32,
+                    end: range.end as u32,
+                    commitment: sha256(&bytes[range.clone()], &blinder),
+                });
+                openings.push(Opening {
+                    direction,
+                    ranges: vec![range.clone()],
+                    blinder,
+                });
             }
-        }
-
-        fn token(sent: &[u8], recv: &[u8]) -> Self {
-            Self::new(
-                sent,
-                recv,
-                &Layout::token_request(sent),
-                &Layout::token_response(recv).unwrap(),
-                1,
-            )
-        }
-
-        fn identity(profile: &Profile, sent: &[u8], recv: &[u8]) -> Self {
-            Self::new(
-                sent,
-                recv,
-                &Layout::identity_request(sent).unwrap(),
-                &Layout::identity_response(recv, &profile.identity.unwrap()).unwrap(),
-                100,
-            )
-        }
-
-        fn proved(&self) -> ProvedSession<'_> {
-            ProvedSession {
-                sent: &self.sent,
-                recv: &self.recv,
-                openings: &self.openings,
-                record: &self.record,
-            }
+            out
+        };
+        let sent_block = block(Direction::Sent, sent, &sl.commit);
+        let recv_block = block(Direction::Received, recv, &rl.commit);
+        HeldSession {
+            sent: sent.to_vec(),
+            recv: recv.to_vec(),
+            openings,
+            record: AttestedData {
+                authority_id: [0; 32],
+                created_at: 0,
+                sent_transcript_length: sent.len() as u32,
+                recv_transcript_length: recv.len() as u32,
+                sent: sent_block,
+                received: recv_block,
+            },
         }
     }
 
-    fn x() -> (Held, Held) {
+    fn held_token(sent: &[u8], recv: &[u8]) -> HeldSession {
+        held(
+            sent,
+            recv,
+            &Layout::token_request(sent),
+            &Layout::token_response(recv).unwrap(),
+            1,
+        )
+    }
+
+    fn held_identity(profile: &Profile, sent: &[u8], recv: &[u8]) -> HeldSession {
+        held(
+            sent,
+            recv,
+            &Layout::identity_request(sent).unwrap(),
+            &Layout::identity_response(recv, &profile.identity.unwrap()).unwrap(),
+            100,
+        )
+    }
+
+    fn x() -> (HeldSession, HeldSession) {
         (
-            Held::token(TOKEN_SENT, TOKEN_RECV),
-            Held::identity(&super::super::profiles::X, X_SENT, X_RECV),
+            held_token(TOKEN_SENT, TOKEN_RECV),
+            held_identity(&super::super::profiles::X, X_SENT, X_RECV),
         )
     }
 
@@ -554,8 +548,8 @@ mod tests {
             b"HTTP/1.1 200 OK\r\n\r\n{\"access_token\":\"gho_X\",\"scope\":\"\"}";
         let sent = b"GET /user HTTP/1.1\r\nhost: api.github.com\r\nauthorization: Bearer gho_X\r\n\r\n";
         let recv = b"HTTP/1.1 200 OK\r\n\r\n{\n  \"login\": \"OctoCat\",\n  \"id\": 583231 ,\n  \"x\": 1\n}";
-        let token = Held::token(token_sent, token_recv);
-        let identity = Held::identity(&github, sent, recv);
+        let token = held_token(token_sent, token_recv);
+        let identity = held_identity(&github, sent, recv);
         let w = IdentityLinkWitness::build(&github, token.proved(), identity.proved())
             .unwrap();
         assert_eq!(w.platform(), "github");
@@ -613,11 +607,11 @@ mod tests {
     #[test]
     fn two_different_bearers_are_refused() {
         // Each session is self-consistent; the relation between them is not.
-        let token = Held::token(
+        let token = held_token(
             TOKEN_SENT,
             b"HTTP/1.1 200 OK\r\n\r\n{\"token_type\":\"bearer\",\"access_token\":\"BEARER-2\"}",
         );
-        let identity = Held::identity(&super::super::profiles::X, X_SENT, X_RECV);
+        let identity = held_identity(&super::super::profiles::X, X_SENT, X_RECV);
         let err = IdentityLinkWitness::build(
             &super::super::profiles::X,
             token.proved(),
@@ -662,8 +656,7 @@ mod tests {
     fn a_non_ascii_handle_is_named_and_not_printed() {
         let recv = "HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"7\",\"username\":\"Al\u{00ef}ce\"}}";
         let (token, _) = x();
-        let identity =
-            Held::identity(&super::super::profiles::X, X_SENT, recv.as_bytes());
+        let identity = held_identity(&super::super::profiles::X, X_SENT, recv.as_bytes());
         let err = IdentityLinkWitness::build(
             &super::super::profiles::X,
             token.proved(),
@@ -700,7 +693,33 @@ mod tests {
         for secret in ["BEARER-1", "2244994945", "Alice_1"] {
             assert!(!printed.contains(secret), "{secret} in {printed}");
         }
-        let blinder = format!("{}", Hex(w.handle().blinder()));
+        let blinder = hex::encode(w.handle().blinder());
         assert!(!printed.contains(&blinder));
+    }
+
+    #[test]
+    fn an_empty_bearer_is_named_as_empty() {
+        let (mut token, identity) = x();
+        token.recv =
+            b"HTTP/1.1 200 OK\r\n\r\n{\"token_type\":\"bearer\",\"access_token\":\"\"}"
+                .to_vec();
+        let err = IdentityLinkWitness::build(
+            &super::super::profiles::X,
+            token.proved(),
+            identity.proved(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            WitnessError::Missing {
+                value: WitnessValue::TokenBearer,
+                layout: LayoutError::EmptyField("access_token".into()),
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "the token bearer cannot be located: the response's `access_token` field is empty, so there is no value to commit"
+        );
+        assert!(std::error::Error::source(&err).is_none());
     }
 }

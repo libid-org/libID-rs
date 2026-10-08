@@ -22,6 +22,7 @@ use crate::ranges::JsonMember;
 mod witness;
 pub use witness::{
     Direction,
+    HeldSession,
     IdentityLinkWitness,
     OpenedValue,
     Opening,
@@ -46,6 +47,8 @@ pub enum LayoutError {
     MissingHeader(&'static str),
     #[error("the response carries no `{0}` field where the profile expects one")]
     MissingField(String),
+    #[error("the response's `{0}` field is empty, so there is no value to commit")]
+    EmptyField(String),
     #[error("the transcript has no head boundary, so its body cannot be located")]
     NoHeadBoundary,
 }
@@ -234,38 +237,14 @@ impl Layout {
     /// committed range is indistinguishable from a `refresh_token` value, or any
     /// other substring the prover chose to commit (REQ-PLAT-57, REQ-PLAT-58).
     pub fn token_response(recv: &[u8]) -> Result<Self, LayoutError> {
-        // Named once, and a constant rather than a parameter. `access_token` is
-        // RFC 6749 section 5.1, not a platform's choice -- which is why the
-        // contract pins `ACCESS_TOKEN_PREFIX` on `TlsNotaryVerifierBase`, shared by
-        // every profile, while the things that ARE platform choices are per-profile
-        // virtuals there and parameters here: the field names of
-        // `Layout::identity_response`.
-        const FIELD: &str = "access_token";
-        let missing = || LayoutError::MissingField(FIELD.into());
-
-        // Through the shared reader rather than a scan of its own. That one locates
-        // the response BODY, so a header carrying this delimiter cannot answer
-        // first, and it refuses a member that chunk framing runs through -- which
-        // this direction cares about most, because the framing would land inside
-        // the committed bearer and the circuit would open a value the token service
-        // never returned.
-        let found = JsonMember::in_response(recv, FIELD).ok_or_else(missing)?;
-
         // Reveal the two delimiters and let the complement commit the bearer
-        // between them. Both boundaries come from the scan that found the member,
-        // so nothing here restates `"access_token":"` to recompute one.
-        //
-        // An empty bearer is refused: it would leave the two reveals adjacent and
-        // commit nothing, and a response direction with no commitment is one the
-        // framing check on chain finds no bearer in.
-        if found.value.is_empty() {
-            return Err(missing());
-        }
-
+        // between them. Both boundaries come from the scan that found the
+        // member, so nothing here restates `"access_token":"` to recompute one.
+        let TokenMembers { bearer } = TokenMembers::in_response(recv)?;
         Ok(Self::revealing(
             [
-                found.member.start..found.value.start,
-                found.value.end..found.member.end,
+                bearer.member.start..bearer.value.start,
+                bearer.value.end..bearer.member.end,
             ],
             recv.len(),
         ))
@@ -344,6 +323,39 @@ impl Layout {
     }
 }
 
+/// Where the bearer sits in a token response.
+///
+/// What [`Layout::token_response`] reveals around, and what a prover opens for
+/// the circuit: `bearer.value` is exactly the committed range the
+/// identity-link circuit's token-bearer opening covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenMembers {
+    pub bearer: JsonMember,
+}
+
+impl TokenMembers {
+    /// The member every token response carries the bearer in. RFC 6749
+    /// section 5.1 names it, not a platform, which is why the contract pins
+    /// `ACCESS_TOKEN_PREFIX` on `TlsNotaryVerifierBase` for every profile.
+    pub const FIELD: &'static str = "access_token";
+
+    /// The bearer member in `recv`, offsets into `recv`.
+    ///
+    /// Located through [`JsonMember::in_response`], which reads the response
+    /// BODY, so a header carrying the delimiter cannot answer first, and
+    /// which refuses a member that chunk framing runs through: framing inside
+    /// the committed bearer would have the circuit open a value the token
+    /// service never returned.
+    ///
+    /// An empty bearer is refused: it would leave the two reveals adjacent and
+    /// commit nothing, and a response direction with no commitment is one the
+    /// framing check on chain finds no bearer in.
+    pub fn in_response(recv: &[u8]) -> Result<Self, LayoutError> {
+        let bearer = nonempty(JsonMember::in_response(recv, Self::FIELD), Self::FIELD)?;
+        Ok(Self { bearer })
+    }
+}
+
 /// Where the two identity members sit in an identity response.
 ///
 /// What [`Layout::identity_response`] reveals around, and what a prover opens
@@ -368,18 +380,24 @@ impl IdentityMembers {
         session: &IdentitySession,
     ) -> Result<Self, LayoutError> {
         let (id_field, handle_field) = (session.id_field, session.handle_field);
-        let missing = |field: &str| LayoutError::MissingField(field.into());
-
         let id = match session.id_shape {
             IdShape::JsonString => JsonMember::in_response(recv, id_field),
             IdShape::JsonInteger => JsonMember::bare_in_response(recv, id_field),
-        }
-        .filter(|found| !found.value.is_empty())
-        .ok_or_else(|| missing(id_field))?;
-        let handle = JsonMember::in_response(recv, handle_field)
-            .filter(|found| !found.value.is_empty())
-            .ok_or_else(|| missing(handle_field))?;
+        };
+        let id = nonempty(id, id_field)?;
+        let handle = nonempty(JsonMember::in_response(recv, handle_field), handle_field)?;
         Ok(Self { id, handle })
+    }
+}
+
+/// `found`, unless it is absent or its value is empty.
+fn nonempty(found: Option<JsonMember>, field: &str) -> Result<JsonMember, LayoutError> {
+    match found {
+        None => Err(LayoutError::MissingField(field.into())),
+        Some(member) if member.value.is_empty() => {
+            Err(LayoutError::EmptyField(field.into()))
+        }
+        Some(member) => Ok(member),
     }
 }
 
@@ -479,7 +497,15 @@ mod tests {
         // direction that carries no commitment at all.
         let recv: &[u8] = br#"HTTP/1.1 200 OK"#;
         let recv = [recv, b"\r\n\r\n", br#"{"access_token":""}"#].concat();
-        assert!(Layout::token_response(&recv).is_err());
+        assert_eq!(
+            Layout::token_response(&recv),
+            Err(LayoutError::EmptyField("access_token".into()))
+        );
+        let absent = b"HTTP/1.1 200 OK\r\n\r\n{\"token_type\":\"bearer\"}";
+        assert_eq!(
+            TokenMembers::in_response(absent),
+            Err(LayoutError::MissingField("access_token".into()))
+        );
     }
 
     #[test]
@@ -720,7 +746,7 @@ mod tests {
             b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"7\",\"username\":\"\"}}";
         assert_eq!(
             Layout::identity_response(recv, &x_identity()),
-            Err(LayoutError::MissingField("username".into()))
+            Err(LayoutError::EmptyField("username".into()))
         );
     }
 
@@ -854,11 +880,11 @@ mod tests {
             b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"\",\"username\":\"alice\"}}";
         assert_eq!(
             Layout::identity_response(recv, &x_identity()),
-            Err(LayoutError::MissingField("id".into()))
+            Err(LayoutError::EmptyField("id".into()))
         );
         assert_eq!(
             IdentityMembers::in_response(recv, &x_identity()),
-            Err(LayoutError::MissingField("id".into()))
+            Err(LayoutError::EmptyField("id".into()))
         );
     }
 
