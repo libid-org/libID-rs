@@ -19,6 +19,18 @@ use std::ops::Range;
 
 use crate::ranges::JsonMember;
 
+mod witness;
+pub use witness::{
+    Direction,
+    IdentityLinkWitness,
+    OpenedValue,
+    Opening,
+    ProvedSession,
+    WitnessError,
+    WitnessValue,
+    BLINDER_LEN,
+};
+
 /// What one direction of one session discloses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
@@ -336,7 +348,8 @@ impl Layout {
 ///
 /// What [`Layout::identity_response`] reveals around, and what a prover opens
 /// for the circuit: `id.value` and `handle.value` are exactly the committed
-/// ranges the identity-link circuit's id and handle openings cover.
+/// ranges the identity-link circuit's id and handle openings cover, which is
+/// how [`IdentityLinkWitness::build`] finds them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IdentityMembers {
     pub id: JsonMember,

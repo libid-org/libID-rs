@@ -44,9 +44,13 @@ use libid_tlsn::attest::{
 use libid_transcript::{
     attestation::AttestedData,
     ceremony::{
+        self,
         profiles,
         token_body,
+        IdentityLinkWitness,
         Layout,
+        Opening,
+        ProvedSession,
     },
 };
 use serde_json::json;
@@ -180,9 +184,51 @@ fn blinder(session: &str, index: usize) -> [u8; 16] {
 }
 
 struct Record {
+    sent: Vec<u8>,
+    recv: Vec<u8>,
     data: AttestedData,
-    openings: Vec<serde_json::Value>,
-    raw_openings: Vec<Opening>,
+    openings: Vec<Opening>,
+}
+
+impl Record {
+    fn proved(&self) -> ProvedSession<'_> {
+        ProvedSession {
+            sent: &self.sent,
+            recv: &self.recv,
+            openings: &self.openings,
+            record: &self.data,
+        }
+    }
+
+    /// The openings as the fixture lists them.
+    fn openings_json(&self) -> Vec<serde_json::Value> {
+        self.openings
+            .iter()
+            .map(|opening| {
+                json!({
+                    "direction": opening.direction.as_str(),
+                    "ranges": opening.ranges.iter().map(|r| json!([r.start, r.end])).collect::<Vec<_>>(),
+                    "blinder": hex0x(&opening.blinder),
+                })
+            })
+            .collect()
+    }
+}
+
+/// The identity-link witness of the two sessions, which the fixture carries
+/// for the circuit's tests. Its commitments are checked against these records,
+/// whose hashes this generator computed with tlsn's hasher: a check of the two
+/// sides agreeing on `SHA256(value || blinder)`, not of tlsn's MPC protocol.
+/// `tests/ceremony_end_to_end.rs` checks the builder against tlsn's own
+/// commitment hash.
+fn witness_json(
+    profile: &libid_transcript::ceremony::Profile,
+    token: &Record,
+    identity: &Record,
+) -> serde_json::Value {
+    let witness = IdentityLinkWitness::build(profile, token.proved(), identity.proved())
+        .unwrap_or_else(|e| panic!("identity-link witness: {e}"));
+    serde_json::to_value(&witness).expect("witness JSON")
 }
 
 /// `prover_generic`'s reveal and commit configuration, then the verifier's
@@ -238,7 +284,6 @@ fn build(
 
     let hasher = Sha256::default();
     let mut openings = Vec::new();
-    let mut raw_openings = Vec::new();
     let commitments: Vec<TranscriptCommitment> = ordered
         .iter()
         .enumerate()
@@ -247,16 +292,17 @@ fn build(
                 Direction::Sent => sent,
                 Direction::Received => recv,
             };
-            let plaintext: Vec<u8> = ranges.iter().flat_map(|r| bytes[r.clone()].to_vec()).collect();
+            let plaintext: Vec<u8> = ranges
+                .iter()
+                .flat_map(|r| bytes[r.clone()].to_vec())
+                .collect();
             let blinder = blinder(session, index);
             let value = hasher.hash_prefixed(&plaintext, &blinder);
-            openings.push(json!({
-                "direction": direction.to_string(),
-                "ranges": ranges.iter().map(|r| json!([r.start, r.end])).collect::<Vec<_>>(),
-                "blinder": format!("0x{}", hex::encode(blinder)),
-            }));
-            raw_openings.push(Opening {
-                sent: *direction == Direction::Sent,
+            openings.push(Opening {
+                direction: match direction {
+                    Direction::Sent => ceremony::Direction::Sent,
+                    Direction::Received => ceremony::Direction::Received,
+                },
                 ranges: ranges.clone(),
                 blinder: blinder.to_vec(),
             });
@@ -279,9 +325,10 @@ fn build(
     })
     .expect("record");
     Record {
+        sent: sent.to_vec(),
+        recv: recv.to_vec(),
         data,
         openings,
-        raw_openings,
     }
 }
 
@@ -300,7 +347,7 @@ fn session_json(
         "received": hex0x(recv),
         "attested_data": hex0x(&attested),
         "notary_signature": hex0x(&signature),
-        "openings": record.openings,
+        "openings": record.openings_json(),
     })
 }
 
@@ -361,7 +408,6 @@ async fn main() {
         "application/json;charset=utf-8",
         r#"{"token_type":"bearer","expires_in":7200,"access_token":"VGhpcyBpcyBub3QgYSByZWFsIGJlYXJlcg","scope":"users.read tweet.read"}"#,
     );
-    let (token_sent, token_recv) = (sent.clone(), recv.clone());
     let token = build(
         "x token",
         &sent,
@@ -419,22 +465,7 @@ async fn main() {
         &sign,
     );
 
-    let witness = identity_link_witness(
-        "x",
-        &ProverSession {
-            sent: &token_sent,
-            recv: &token_recv,
-            openings: &token.raw_openings,
-            data: &token.data,
-        },
-        &ProverSession {
-            sent: &sent,
-            recv: &recv,
-            openings: &identity.raw_openings,
-            data: &identity.data,
-        },
-        &x.identity.unwrap(),
-    );
+    let witness = witness_json(&x, &token, &identity);
     let mut file = common("x");
     file["token"] = x_token;
     file["identity"] = x_identity;
@@ -481,7 +512,6 @@ async fn main() {
         recv.clone(),
     )
     .await;
-    let (token_sent, token_recv) = (sent.clone(), recv.clone());
     let token = build(
         "github token",
         &sent,
@@ -545,22 +575,7 @@ async fn main() {
         &sign,
     );
 
-    let witness = identity_link_witness(
-        "github",
-        &ProverSession {
-            sent: &token_sent,
-            recv: &token_recv,
-            openings: &token.raw_openings,
-            data: &token.data,
-        },
-        &ProverSession {
-            sent: &sent,
-            recv: &recv,
-            openings: &identity.raw_openings,
-            data: &identity.data,
-        },
-        &github.identity.unwrap(),
-    );
+    let witness = witness_json(&github, &token, &identity);
     let mut file = common("github");
     file["token"] = github_token;
     file["identity"] = github_identity;

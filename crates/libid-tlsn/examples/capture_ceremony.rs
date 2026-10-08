@@ -75,14 +75,14 @@ use libid_transcript::{
         form_encode,
         profiles,
         token_body,
+        IdentityLinkWitness,
         Layout,
+        Opening,
+        ProvedSession,
     },
 };
 use serde_json::json;
-use tlsn::{
-    connection::ServerName,
-    transcript::Direction,
-};
+use tlsn::connection::ServerName;
 use tokio::{
     io::{
         AsyncReadExt,
@@ -259,12 +259,12 @@ struct Session {
 }
 
 impl Session {
-    fn prover(&self) -> ProverSession<'_> {
-        ProverSession {
+    fn proved(&self) -> ProvedSession<'_> {
+        ProvedSession {
             sent: &self.sent,
             recv: &self.recv,
             openings: &self.openings,
-            data: &self.data,
+            record: &self.data,
         }
     }
 }
@@ -333,11 +333,7 @@ async fn notarize(
     let openings = prover
         .commitment_openings
         .iter()
-        .map(|o| Opening {
-            sent: o.direction == Direction::Sent,
-            ranges: o.ranges.clone(),
-            blinder: o.blinder.clone(),
-        })
+        .map(Opening::from)
         .collect();
     let (sent, recv) = transcript;
     Ok(Session {
@@ -472,12 +468,9 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
-            let witness = identity_link_witness(
-                "x",
-                &token.prover(),
-                &identity.prover(),
-                &profile.identity.unwrap(),
-            );
+            let witness =
+                IdentityLinkWitness::build(&profile, token.proved(), identity.proved())
+                    .unwrap_or_else(|e| fail(format!("identity-link witness: {e}")));
             (
                 session_json("https://api.x.com/2/oauth2/token", &token),
                 session_json("https://api.x.com/2/users/me", &identity),
@@ -549,12 +542,9 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
-            let witness = identity_link_witness(
-                "github",
-                &token.prover(),
-                &identity.prover(),
-                &profile.identity.unwrap(),
-            );
+            let witness =
+                IdentityLinkWitness::build(&profile, token.proved(), identity.proved())
+                    .unwrap_or_else(|e| fail(format!("identity-link witness: {e}")));
             (
                 session_json("https://github.com/login/oauth/access_token", &token),
                 session_json("https://api.github.com/user", &identity),

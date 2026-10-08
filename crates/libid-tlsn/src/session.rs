@@ -297,6 +297,21 @@ pub struct CommitmentOpening {
     pub blinder: Vec<u8>,
 }
 
+/// The same opening in `libid_transcript`'s tlsn-free terms, which is what
+/// [`libid_transcript::ceremony::IdentityLinkWitness::build`] takes.
+impl From<&CommitmentOpening> for libid_transcript::ceremony::Opening {
+    fn from(opening: &CommitmentOpening) -> Self {
+        Self {
+            direction: match opening.direction {
+                Direction::Sent => libid_transcript::ceremony::Direction::Sent,
+                Direction::Received => libid_transcript::ceremony::Direction::Received,
+            },
+            ranges: opening.ranges.clone(),
+            blinder: opening.blinder.clone(),
+        }
+    }
+}
+
 /// Result from the MPC-TLS prover.
 pub struct ProverResult<T> {
     /// The HTTP response body from the platform API (decoded, headers stripped).
