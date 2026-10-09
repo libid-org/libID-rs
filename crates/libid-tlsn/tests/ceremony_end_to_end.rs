@@ -17,8 +17,7 @@
 //!
 //! What this does not check is that a live MPC session computes the same
 //! value. `prover_generic` dials `<host>:443` and trusts the WebPKI roots only,
-//! so it cannot be pointed at an in-process server; `capture_ceremony`
-//! performs that check against a real platform.
+//! so it cannot be pointed at an in-process server.
 //!
 //! Each assertion below names the check it mirrors, so a rule that changes on
 //! chain has one place to change here.
