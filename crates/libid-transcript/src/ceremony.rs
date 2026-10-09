@@ -1,25 +1,9 @@
 //! Choosing what a notarized session reveals.
 //!
-//! The Platform Verifier checks that the revealed ranges and the commitments
-//! TILE the transcript: every byte accounted for, no gap and no overlap. A gap
-//! is where a prover hides bytes, so a session that leaves one is refused --
-//! which means the selection here is not a disclosure preference, it is a
-//! correctness requirement. Choose the wrong ranges and no honest ceremony
-//! verifies at all.
-//!
-//! Every layout below therefore names only what it REVEALS, and the commitments
-//! are derived as the complement. Tiling then holds by construction rather than
-//! by inspection.
-//!
-//! Nothing here is applied on anyone's behalf. A prover notarizing a ceremony
-//! session calls these and hands the result to `prover_generic`; a prover doing
-//! something else states its own.
-//!
-//! The values a layout commits -- the bearer in each session, and the id and
-//! handle in the identity response -- are exactly the ranges the identity-link
-//! circuit opens. [`token_bearer`], [`identity_bearer`] and [`IdentityMembers`]
-//! name them, from the scans the layouts are built on, for a prover assembling
-//! that circuit's witness.
+//! Each layout names what it reveals and commits the complement, so it tiles
+//! the transcript as the Platform Verifier requires. [`token_bearer`],
+//! [`identity_bearer`] and [`IdentityMembers`] locate the committed values the
+//! identity-link circuit opens.
 
 use std::ops::Range;
 
@@ -218,43 +202,22 @@ impl Layout {
         Layout { reveal, commit }
     }
 
-    /// The token request, revealed whole.
-    ///
-    /// No launch profile hides a body field: X authenticates with a public
-    /// client, and the credential GitHub calls `client_secret` is a public
-    /// credential its verifier reads. So the request is one revealed run from
-    /// the request line to the last body byte, and the verifier holds the body
-    /// it reads there to the profile's `token_fields` -- exactly those names in
-    /// that order, one nonempty value each (see [`token_body`]). The verifier
-    /// locates that body after exactly one head boundary, so a request holding
-    /// any other number is refused here.
+    /// The token request, revealed whole. Refused unless it holds exactly one
+    /// head boundary, as the verifier requires.
     pub fn token_request(sent: &[u8]) -> Result<Self, LayoutError> {
         head_end(sent)?;
         Ok(Self::revealing(core::iter::once(0..sent.len()), sent.len()))
     }
 
-    /// The token response: the `"access_token":"` delimiter and its closing quote
-    /// are revealed, and everything else -- the bearer included -- is committed.
-    ///
-    /// Those two anchors are what identify the committed bearer. Without them the
-    /// committed range is indistinguishable from a `refresh_token` value, or any
-    /// other substring the prover chose to commit (REQ-PLAT-57, REQ-PLAT-58).
+    /// The token response: the bearer's anchors revealed, everything else
+    /// committed.
     pub fn token_response(recv: &[u8]) -> Result<Self, LayoutError> {
         Ok(Self::revealing(token_bearer(recv)?.anchors(), recv.len()))
     }
 
-    /// The identity request: every byte revealed except the bearer value, which is
-    /// committed.
-    ///
-    /// The two revealed runs plus the committed one account for the request exactly,
-    /// which is what REQ-COMMON-35 demands and what leaves the committed range as
-    /// the only region the verifier cannot read.
-    ///
-    /// `sent` must be exactly one request with no body: one `\r\n\r\n`, ending
-    /// the direction. libID-contracts' Platform Verifier holds the identity
-    /// request to that (`CeremonyAttestation.requireOneBodilessRequest`), so a
-    /// direction it would refuse is refused here, before a session is notarized
-    /// over it.
+    /// The identity request: everything revealed but the committed bearer.
+    /// Refused unless `sent` is exactly one bodiless request, as the verifier
+    /// requires.
     pub fn identity_request(sent: &[u8]) -> Result<Self, LayoutError> {
         let end = head_end(sent)?;
         if end != sent.len() {
@@ -267,34 +230,9 @@ impl Layout {
         ))
     }
 
-    /// The identity response: the delimiters of the two identity members, and
-    /// nothing else. The id and handle VALUES are committed, each as its own
-    /// range, and so is everything around the members.
-    ///
-    /// Each member's opening run (`"username":"`, `"id": `) and closing run
-    /// (`"`, or the `,`/`}` after a bare integer) are revealed, so the verifier
-    /// finds each value as the one commitment those anchors frame. The values
-    /// themselves never reach the chain: the identity-link circuit opens the
-    /// two commitments and outputs only their tagged hashes.
-    ///
-    /// # What committing the rest costs, and why it is taken
-    ///
-    /// Every reader on the verifying side scans revealed bytes. A commitment is
-    /// invisible to all of them. So a response that genuinely names an
-    /// authoritative field twice lets a prover commit the real member and frame
-    /// the one it chose, and the anchor count still sees one. Uniqueness is a
-    /// property of the document, and this establishes it over a part.
-    ///
-    /// Reaching that needs the PLATFORM to emit the duplicate. ASM-PROV-06
-    /// assumes it does not, and JSON escaping keeps a `"field":"` delimiter out
-    /// of any value the account controls. A duplicate that reaches the
-    /// REVEALED bytes is still caught on chain.
-    ///
-    /// What the commitments buy is that the rest of the response never reaches
-    /// the chain. `GET /user` under an OAuth client holding a `user`-family
-    /// scope returns the account's plan, private-repository counts, disk usage
-    /// and two-factor state; revealing the response whole would publish all of
-    /// it, permanently, for every bind.
+    /// The identity response: the anchors of the id and handle revealed, each
+    /// value and everything else committed, keeping the account's other fields
+    /// off chain.
     pub fn identity_response(
         recv: &[u8],
         session: &IdentitySession,
@@ -325,35 +263,19 @@ fn head_end(sent: &[u8]) -> Result<usize, LayoutError> {
     }
 }
 
-/// The member every token response carries the bearer in. RFC 6749 section
-/// 5.1 names it, not a platform, which is why the contract pins
-/// `ACCESS_TOKEN_PREFIX` on `TlsNotaryVerifierBase` for every profile.
+/// The bearer's member in every token response (RFC 6749 section 5.1).
 const ACCESS_TOKEN: &str = "access_token";
 
-/// The bytes before the identity request's bearer: the contract's
-/// `BEARER_PREFIX`, the header line as hyper writes it.
+/// The contract's `BEARER_PREFIX`: the bytes before the identity request's bearer.
 const BEARER_PREFIX: &[u8] = b"\r\nauthorization: Bearer ";
 
-/// The bearer member in a token response, offsets into `recv`.
-///
-/// Located through [`JsonMember::in_response`], which reads the response
-/// BODY, so a header carrying the delimiter cannot answer first, and which
-/// refuses a member that chunk framing runs through: framing inside the
-/// committed bearer would have the circuit open a value the token service
-/// never returned.
-///
-/// An empty bearer is refused: it would leave the two reveals adjacent and
-/// commit nothing, and a response direction with no commitment is one the
-/// framing check on chain finds no bearer in.
+/// The bearer member in a token response's body, offsets into `recv`.
+/// Refused when empty.
 pub fn token_bearer(recv: &[u8]) -> Result<JsonMember, LayoutError> {
     nonempty(JsonMember::in_response(recv, ACCESS_TOKEN), ACCESS_TOKEN)
 }
 
-/// The bearer in an identity request, from after the contract's
-/// `BEARER_PREFIX` to the CRLF that ends its line, offsets into `sent`.
-///
-/// An empty bearer is refused: it would commit nothing, and the verifier
-/// takes exactly one commitment.
+/// The bearer in an identity request, offsets into `sent`. Refused when empty.
 pub fn identity_bearer(sent: &[u8]) -> Result<Range<usize>, LayoutError> {
     const HEADER: &str = "authorization";
     let start = find_first(sent, BEARER_PREFIX)
@@ -377,11 +299,7 @@ pub struct IdentityMembers {
 
 impl IdentityMembers {
     /// Both members of `session`'s profile in `recv`, offsets into `recv`.
-    ///
-    /// The field names come from one profile, so a transposed call cannot
-    /// happen here. An empty value is refused: it would leave the two anchors
-    /// adjacent and commit nothing, and the verifier would find no framed
-    /// commitment.
+    /// Refused when either value is empty.
     pub fn in_response(
         recv: &[u8],
         session: &IdentitySession,
@@ -765,10 +683,7 @@ mod tests {
             revealed(&l, recv),
             [&b"\"id\":\""[..], b"\"", b"\"username\":\"", b"\""]
         );
-        // Each value is a commitment of its own, exactly the value: the
-        // circuit opens it, so a range carrying a quote would not open to the
-        // id or handle the platform returned. The handle is committed as the
-        // wire carries it; the circuit folds it, not the layout.
+        // Each value is its own commitment, exactly as the wire carries it.
         let hidden = committed(&l, recv);
         assert!(hidden.contains(&&b"2244994945"[..]), "{hidden:?}");
         assert!(hidden.contains(&&b"Alice_1"[..]), "{hidden:?}");
@@ -788,11 +703,8 @@ mod tests {
 
     #[test]
     fn the_github_identity_response_reveals_the_id_terminator_and_commits_the_digits() {
-        // GitHub's id is a BARE integer, so the two members are not the same
-        // shape: `login` closes on a quote, `id` closes on the structural byte
-        // after the digits. That byte is revealed, because it is what proves
-        // the committed digits are the whole number and not a prefix of a
-        // longer one -- the profile pins it to `,` or `}` and no other.
+        // The bare id closes on a revealed `,` or `}`, which proves the
+        // committed digits are the whole number.
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"login\":\"octocat\",\"id\":583231,\"node_id\":\"MDQ=\"}";
         let l = Layout::identity_response(recv, &github_identity()).unwrap();
         assert!(tiles(&l, recv.len()));
@@ -845,13 +757,8 @@ mod tests {
 
     #[test]
     fn a_response_that_names_the_handle_first_still_reveals_in_offset_order() {
-        // JSON member order is not the platform's promise. `Layout::revealing`
-        // sorts: `complement` walks the reveals taking each as starting where
-        // the last one ended, so an unsorted list reads as overlap and yields a
-        // complement that tiles nothing.
-        //
-        // Every other fixture here happens to serialize `id` first, so this is
-        // the one that exercises the sort.
+        // The one fixture with the handle first: it exercises the sort in
+        // `Layout::revealing`.
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"username\":\"alice\",\"id\":\"7\"}";
         let l = Layout::identity_response(recv, &x_identity()).unwrap();
         assert!(tiles(&l, recv.len()));
@@ -877,16 +784,8 @@ mod tests {
         }
     }
 
-    /// The one duplicate this layout cannot defend against, recorded so the
-    /// assumption is visible on the prover side too.
-    ///
-    /// A response naming `username` twice lets the revealed anchors frame one
-    /// member while the other stays committed, invisible to
-    /// `requireFramedCommitment`, which counts the prefix over revealed bytes
-    /// only. Reaching it needs the platform to emit that document: ASM-PROV-06
-    /// assumes it does not, and JSON escaping keeps the delimiter out of any
-    /// value the account controls. The layout picks the first match and does
-    /// not detect the second -- stated here rather than left to be discovered.
+    /// A duplicate member stays committed and undetected; ASM-PROV-06 assumes
+    /// the platform never emits one.
     #[test]
     fn a_response_naming_a_member_twice_reveals_only_one() {
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"id\":\"7\",\"username\":\"victim\",\"username\":\"alice\"}";
@@ -910,9 +809,7 @@ mod tests {
 
     #[test]
     fn a_github_id_s_value_is_the_digits_without_the_whitespace_before_the_comma() {
-        // Pretty-printed, with whitespace between the digits and `,`: the
-        // committed value is the digits, and the whitespace is revealed with
-        // the terminator, where `_terminatedAt` skips it.
+        // The whitespace before `,` is revealed with the terminator.
         let recv: &[u8] =
             b"HTTP/1.1 200 OK\r\n\r\n{\n  \"login\": \"octocat\",\n  \"id\": 583231 ,\n  \"x\": 1\n}";
         let members = IdentityMembers::in_response(recv, &github_identity()).unwrap();

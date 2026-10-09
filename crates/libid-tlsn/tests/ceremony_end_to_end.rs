@@ -1,26 +1,9 @@
 //! The stitch between choosing a layout and what the verifier demands of it.
 //!
-//! Every piece of the ceremony has its own tests. What had none is the JOIN:
-//! `libid_transcript::ceremony` picks the ranges, `libid_tlsn::attest` turns a
-//! session into the attested-data record, and a Platform Verifier on chain then
-//! applies rules neither of them states. A layout can be internally consistent,
-//! encode cleanly, and still be refused.
-//!
-//! So this drives all three for both X sessions and GitHub's identity session
-//! and asserts, on the decoded record, the rules the Solidity side enforces.
-//! It is not a network test and runs no MPC: there is no TLS here, and the
-//! session is reproduced from the layouts rather than notarized. The
-//! commitments are tlsn's own `PlaintextHash` values, computed by tlsn's
-//! `hash_plaintext` with a tlsn `Blinder` per commitment, and the
-//! identity-link witness `ceremony_fixtures` emits is built from those
-//! openings and checked against them.
-//!
-//! What this does not check is that a live MPC session computes the same
-//! value. `prover_generic` dials `<host>:443` and trusts the WebPKI roots only,
-//! so it cannot be pointed at an in-process server.
-//!
-//! Each assertion below names the check it mirrors, so a rule that changes on
-//! chain has one place to change here.
+//! Drives `ceremony` layouts through `attest` and asserts, on the decoded
+//! record, the rules the Solidity side enforces. No TLS or MPC: sessions are
+//! reproduced from the layouts with tlsn's own commitment hashes. Each
+//! assertion names the check it mirrors.
 
 #[path = "../examples/ceremony/common.rs"]
 mod common;
@@ -87,9 +70,7 @@ const GITHUB_TOKEN_RECV: &[u8] =
 const GITHUB_ID_SENT: &[u8] = b"GET /user HTTP/1.1\r\nhost: api.github.com\r\nauthorization: Bearer gho_SECRETBEARER\r\nconnection: close\r\n\r\n";
 const GITHUB_ID_RECV: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\n  \"login\": \"OctoCat\",\n  \"id\": 583231 ,\n  \"node_id\": \"MDQ6VXNlcjU4MzIzMQ==\",\n  \"plan\": \"pro\"\n}";
 
-/// A distinct tlsn blinder per commitment. tlsn constructs one only from
-/// randomness or by deserializing, so these are deserialized from fixed bytes
-/// and the records reproduce.
+/// A distinct, fixed tlsn blinder per commitment, so the records reproduce.
 fn blinder(direction: Direction, index: usize) -> Blinder {
     let tag = match direction {
         Direction::Sent => 0x50,
@@ -101,15 +82,8 @@ fn blinder(direction: Direction, index: usize) -> Blinder {
     serde_json::from_value(serde_json::json!(bytes)).expect("a 16-byte blinder")
 }
 
-/// Turn a pair of layouts into the session as its prover and its notary end
-/// up holding it: the full transcript, the prover's openings, and the record
-/// built from the [`ObservedSession`] the notary's verifier holds.
-///
-/// This is the step a real session performs inside MPC: the prover states what
-/// it reveals, and the verifier ends up holding the revealed transcript and a
-/// commitment per hidden run. Each commitment is tlsn's `PlaintextHash`, from
-/// tlsn's `hash_plaintext` over the committed bytes and a tlsn [`Blinder`];
-/// the prover keeps the blinder as a [`CommitmentOpening`].
+/// A pair of layouts as the session MPC would leave: the transcript, the
+/// prover's openings, and the record built from the [`ObservedSession`].
 fn record(
     sent: &[u8],
     recv: &[u8],
@@ -407,10 +381,7 @@ fn the_identity_session_produces_a_record_the_verifier_accepts() {
         "the rest of the response must be committed, not published"
     );
 
-    // What the verifier can read is the anchors of the two members, each
-    // once, and not their values. A duplicate anchor reaching these bytes is
-    // still caught on chain; one behind a commitment is not, and ASM-PROV-06
-    // is what stands in for that.
+    // The verifier reads each member's anchor once, and neither value.
     let body = joined(&data.received);
     assert_eq!(count(&body, b"\"id\":\""), 1);
     assert_eq!(count(&body, b"\"username\":\""), 1);
@@ -451,13 +422,8 @@ fn assert_the_witness_opens_the_record(
         .expect("the witness opens the record");
     assert_eq!(witness["platform"], profile.platform);
 
-    // Each of the four is the commitment the verifier's own rules select
-    // from the record -- `requireFramedCommitment` for the token bearer and
-    // the handle, `requireFramedCommitment` or `requireFramedInteger` for the
-    // id as the profile shapes it, `requireBearerHeaderRequest` for the
-    // identity bearer -- and is recomputed here, independently of the
-    // builder: SHA256(value || blinder) with the `sha2` crate equals that
-    // commitment, which tlsn's `hash_plaintext` produced.
+    // Each value opens the commitment the verifier's rules select, recomputed
+    // with `sha2` independently of the builder.
     let session = profile.identity.unwrap();
     let id = match session.id_shape {
         profiles::IdShape::JsonString => framed(

@@ -1,14 +1,7 @@
 //! The identity-link circuit's witness for one ceremony, as JSON.
 //!
 //! Included by `#[path]` from `ceremony_fixtures` and
-//! `tests/ceremony_end_to_end.rs`, each beside `common`; not an example of its
-//! own.
-//!
-//! The circuit opens four committed ranges: the bearer in the token response,
-//! the bearer in the identity request, and the id and the handle in the
-//! identity response. Each is located by the scan its layout was built from,
-//! paired with its opening, and checked: `SHA256(value || blinder)` must equal
-//! the commitment the notary signed over that range.
+//! `tests/ceremony_end_to_end.rs`; not an example of its own.
 
 use std::ops::Range;
 

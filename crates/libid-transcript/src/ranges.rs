@@ -1,13 +1,8 @@
 //! TLS transcript parsing and byte-range helpers for selective disclosure.
 //!
-//! All functions operate on raw transcript bytes (`sent` / `recv`) and return
-//! `Range<usize>` offsets into them. The attested record carries the revealed
-//! slices at those offsets and a commitment over each hidden run, and a
-//! Platform Verifier reads the revealed bytes and locates each committed value
-//! by the revealed anchors around it -- so every helper here
-//! fails closed: a range that cannot be located contiguously in the RAW
-//! transcript, such as a member split across a chunk boundary, yields `None`
-//! rather than a range pointing at bytes nobody sent.
+//! Every helper returns offsets into the raw transcript and fails closed: a
+//! range not contiguous in the raw bytes, such as a member split across a
+//! chunk boundary, yields `None`.
 
 use std::ops::Range;
 
@@ -135,35 +130,10 @@ pub struct JsonMember {
 }
 
 impl JsonMember {
-    /// The member named `field` in `body`, with offsets INTO `body`.
+    /// The first member named `field` in `body`, offsets into `body`.
     ///
-    /// Raw bytes in, raw offsets out: this scans whatever it is handed, so a
-    /// caller passing a whole HTTP response gets whichever match comes first --
-    /// a header's, if a header carries the delimiter. [`JsonMember::in_response`]
-    /// is the one that locates the body first, and is what a caller building a
-    /// reveal layout wants.
-    ///
-    /// # The template is the reader's
-    ///
-    /// The reader is `CeremonyAttestation.requireFramedCommitment` in
-    /// libid-contracts. It finds the value as the commitment whose preceding
-    /// revealed range, JSON whitespace beside a structural byte removed
-    /// (`_anchoredBy`), ends with the literal `"<name>":"`, and whose next
-    /// revealed byte is the closing `"`. So this accepts exactly what that
-    /// removal maps onto the literal -- whitespace between the key and the
-    /// colon, and between the colon and the value -- and nothing else. Anything
-    /// looser picks a range the reader cannot frame: a body written
-    /// `"login" "octocat"`, no colon, would be laid out here and then met with
-    /// `NoFramedCommitment` on chain, which is the same refusal reported where
-    /// nobody can see why. Failing here fails it where the reason is visible.
-    ///
-    /// Uniqueness is NOT checked here, and that is deliberate. The reader
-    /// refuses a prefix occurring twice in the bytes it was shown
-    /// (`AmbiguousFraming`), and which bytes those are is exactly what a layout
-    /// decides -- so `identity_response` reveals one member's anchors and
-    /// commits the rest, and the reader sees one. Refusing a second occurrence
-    /// here would only stop an honest prover from building that layout; a
-    /// dishonest one does not run this code at all.
+    /// Accepts whitespace only beside the colon, as the on-chain reader
+    /// (`_anchoredBy`) does. Uniqueness is left to the layout.
     fn in_body(body: &[u8], field: &str) -> Option<Self> {
         // The key, then `:`, then the value's opening quote, with the
         // whitespace JSON allows on either side of the colon kept inside the
@@ -182,25 +152,13 @@ impl JsonMember {
         })
     }
 
-    /// The member named `field_name` in an HTTP response, with offsets into the
-    /// RAW `recv` transcript.
-    ///
-    /// For a caller that reveals a member's delimiters and commits what sits
-    /// between them: both boundaries come from the scan that found them, so no
-    /// caller restates the template to recover one.
-    ///
-    /// The offsets are the whole difference from `in_body`, and the reason the
-    /// two are named apart. A reveal layout selects ranges of the TRANSCRIPT, so a
-    /// body-relative range handed to one selects bytes somewhere up in the
-    /// response headers -- a range that is well formed, signed, and pointing at
-    /// the wrong thing.
+    /// The member named `field_name` in an HTTP response's body, offsets into
+    /// the raw `recv` transcript.
     pub fn in_response(recv: &[u8], field_name: &str) -> Option<Self> {
         Self::locate(recv, field_name, Self::in_body)
     }
 
-    /// The two runs a layout reveals around a committed value: the member's
-    /// opening through the byte before the value, and the byte after the value
-    /// through the member's close.
+    /// The two runs a layout reveals around the committed value.
     pub(crate) fn anchors(&self) -> [Range<usize>; 2] {
         [
             self.member.start..self.value.start,
@@ -208,16 +166,9 @@ impl JsonMember {
         ]
     }
 
-    /// The bare (unquoted) integer member named `field` in `body`: `member`
-    /// runs from the key's opening `"` through the `,` or `}` that closes the
-    /// number, and `value` is the digits alone.
-    ///
-    /// Digits, then the byte that closes them -- the order
-    /// `CeremonyAttestation.requireFramedInteger` frames them in: `"<name>":`
-    /// revealed before the committed digits, and a revealed range starting
-    /// where they end whose first byte past JSON whitespace is `,` or `}`
-    /// (`_terminatedAt`). Scanning instead to the first `,` or `}` would accept
-    /// `"id":"7",`, a quoted value returned as though it were a number.
+    /// The bare integer member named `field` in `body`: `member` runs through
+    /// the `,` or `}` closing the number, `value` is the digits alone.
+    /// Reads digits, then the terminator, as `requireFramedInteger` does.
     fn bare_in_body(body: &[u8], field: &str) -> Option<Self> {
         let (start, digits) = key_and_value(body, field, false)?;
         let rest = body.get(digits..)?;
@@ -231,10 +182,7 @@ impl JsonMember {
         }
         let end = digits.checked_add(width)?;
 
-        // The terminator closes the member: it is what proves the digits are
-        // the whole number rather than a prefix of a longer one, and the
-        // profile fixes it as `,` or `}` and no other byte (REQ-PLAT-51). JSON
-        // whitespace may sit before it.
+        // The terminator proves the digits are the whole number (REQ-PLAT-51).
         let term = skip_json_whitespace(body, end);
         match body.get(term) {
             Some(b',') | Some(b'}') => Some(Self {
@@ -245,16 +193,14 @@ impl JsonMember {
         }
     }
 
-    /// [`JsonMember::bare_in_body`] over a whole response, with offsets into
-    /// `recv` -- located and checked the way [`JsonMember::in_response`] is.
+    /// The bare integer member named `field_name` in an HTTP response's body,
+    /// offsets into the raw `recv` transcript.
     pub fn bare_in_response(recv: &[u8], field_name: &str) -> Option<Self> {
         Self::locate(recv, field_name, Self::bare_in_body)
     }
 
-    /// `scan` over the response body of `recv`, with offsets into `recv`.
-    ///
-    /// Found in both bodies: the decoded body says the member exists, the raw
-    /// body says where it sits, and the two must hold the same bytes.
+    /// `scan` over the response body of `recv`, offsets into `recv`. The raw
+    /// and decoded bodies must hold the member's same bytes.
     fn locate(
         recv: &[u8],
         field_name: &str,
@@ -476,10 +422,8 @@ mod tests {
 
     #[test]
     fn a_quoted_value_is_not_a_bare_number() {
-        // Digits, then the terminator. A scan that instead ran to the first
-        // `,` would return `"id":"7",` here, and the chain would find no
-        // framed integer -- the same answer, given where the reason is not
-        // visible.
+        // Digits, then the terminator: a scan to the first `,` would return
+        // `"id":"7",`.
         let body = br#"{"login":"octocat","id":"7","x":1}"#;
         assert!(bare_member(body, "id").is_none());
     }

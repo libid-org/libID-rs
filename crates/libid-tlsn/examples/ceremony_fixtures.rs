@@ -387,8 +387,7 @@ async fn main() {
 
     let recv = answer(
         "application/json;charset=utf-8",
-        // Mixed case, as X returns it: the commitment holds these bytes and
-        // the circuit folds them, so the fixture exercises the fold.
+        // Mixed case, so the fixture exercises the circuit's fold.
         r#"{"data":{"id":"2244994945","name":"Al Ice","username":"Alice_1"}}"#,
     );
     let sent = exchange(
@@ -423,10 +422,7 @@ async fn main() {
     let mut file = common("x");
     file["token"] = x_token;
     file["identity"] = x_identity;
-    // For the circuit's tests. Its commitments are checked against these
-    // records, whose hashes this generator computed with tlsn's hasher;
-    // `tests/ceremony_end_to_end.rs` checks the helper against tlsn's own
-    // commitment hash.
+    // For the circuit's tests.
     file["identity_link_witness"] =
         identity_link_witness(&x, &token, &identity).expect("x identity-link witness");
     std::fs::write(
