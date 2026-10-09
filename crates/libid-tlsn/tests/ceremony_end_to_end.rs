@@ -185,15 +185,37 @@ fn count(haystack: &[u8], needle: &[u8]) -> usize {
         .count()
 }
 
-/// The bytes with JSON whitespace removed. `CeremonyFields.normalizeJsonBytes`
-/// removes it beside a structural byte only; these fixtures put it nowhere
-/// else, so removing all of it reads them the same way.
+/// `CeremonyFields.normalizeJsonBytes`: each run of JSON whitespace goes when
+/// the last byte kept before it, or the byte after it, is `:` `,` `{` `}` `[`
+/// or `]`; any other run stays.
 fn normalized(bytes: &[u8]) -> Vec<u8> {
-    bytes
-        .iter()
-        .copied()
-        .filter(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
-        .collect()
+    let structural = |b: &u8| b":,{}[]".contains(b);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let run = bytes[i..]
+            .iter()
+            .take_while(|b| b" \t\n\r".contains(b))
+            .count();
+        let k = i + run.max(1);
+        if run == 0
+            || !(out.last().is_some_and(structural)
+                || bytes.get(k).is_some_and(structural))
+        {
+            out.extend_from_slice(&bytes[i..k]);
+        }
+        i = k;
+    }
+    out
+}
+
+/// `CeremonyFields.t.sol`'s vectors: a run beside a structural byte goes, a
+/// run between two tokens stays.
+#[test]
+fn normalization_is_the_contract_s() {
+    let body = b"{\n  \"login\" \t: \"alice\",\r\n  \"id\" : 123 \n}";
+    assert_eq!(normalized(body), br#"{"login":"alice","id":123}"#);
+    assert_eq!(normalized(b"{\"id\":123 4}"), b"{\"id\":123 4}");
 }
 
 /// The commitments `CeremonyAttestation._anchoredBy` accepts for `prefix`: a
