@@ -21,9 +21,10 @@ pub const CEREMONY_VERSION: u16 = 1;
 /// The user agent the browser sends on GitHub's identity read.
 pub const BROWSER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
-/// `abi.encode(address(0xBEEF))`.
+/// `abi.encode(address(0xBEEF), uint256(0), address(0))`: the target
+/// `IdentityRegistry.bind` takes, with no service fee.
 pub fn transaction_data() -> Vec<u8> {
-    let mut data = vec![0u8; 32];
+    let mut data = vec![0u8; 96];
     data[30] = 0xBE;
     data[31] = 0xEF;
     data

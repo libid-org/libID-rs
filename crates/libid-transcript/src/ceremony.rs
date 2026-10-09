@@ -1,25 +1,14 @@
 //! Choosing what a notarized session reveals.
 //!
-//! The Platform Verifier checks that the revealed ranges and the commitments
-//! TILE the transcript: every byte accounted for, no gap and no overlap. A gap
-//! is where a prover hides bytes, so a session that leaves one is refused --
-//! which means the selection here is not a disclosure preference, it is a
-//! correctness requirement. Choose the wrong ranges and no honest ceremony
-//! verifies at all.
-//!
-//! Every layout below therefore names only what it REVEALS, and the commitments
-//! are derived as the complement. Tiling then holds by construction rather than
-//! by inspection.
-//!
-//! Nothing here is applied on anyone's behalf. A prover notarizing a ceremony
-//! session calls these and hands the result to `prover_generic`; a prover doing
-//! something else states its own.
+//! Each layout names what it reveals and commits the complement, so it tiles
+//! the transcript as the Platform Verifier requires. [`token_bearer`],
+//! [`identity_bearer`] and [`IdentityMembers`] locate the committed values the
+//! identity-link circuit opens.
 
 use std::ops::Range;
 
 use crate::ranges::{
-    compute_field_snippet_range,
-    compute_id_snippet_range,
+    find_first,
     JsonMember,
 };
 
@@ -38,8 +27,14 @@ pub enum LayoutError {
     MissingHeader(&'static str),
     #[error("the response carries no `{0}` field where the profile expects one")]
     MissingField(String),
-    #[error("the transcript has no head boundary, so its body cannot be located")]
-    NoHeadBoundary,
+    #[error("the response's `{0}` field is empty, so there is no value to commit")]
+    EmptyField(String),
+    #[error("the request holds {0} head boundaries (`\\r\\n\\r\\n`) where one HTTP request holds exactly one")]
+    NoHeadBoundary(usize),
+    #[error("the request's `{0}` header has an empty value, so there is no credential to commit")]
+    EmptyHeader(&'static str),
+    #[error("{0} bytes follow the head of a request that has no body")]
+    BytesAfterRequest(usize),
 }
 
 /// Why a token body could not be serialized from a profile's field list.
@@ -207,145 +202,127 @@ impl Layout {
         Layout { reveal, commit }
     }
 
-    /// The token request, revealed whole.
-    ///
-    /// No launch profile hides a body field: X authenticates with a public
-    /// client, and the credential GitHub calls `client_secret` is a public
-    /// credential its verifier reads. So the request is one revealed run from
-    /// the request line to the last body byte, and the verifier holds the body
-    /// it reads there to the profile's `token_fields` -- exactly those names in
-    /// that order, one nonempty value each (see [`token_body`]).
-    pub fn token_request(sent: &[u8]) -> Self {
-        Self::revealing(core::iter::once(0..sent.len()), sent.len())
+    /// The token request, revealed whole. Refused unless it holds exactly one
+    /// head boundary, as the verifier requires.
+    pub fn token_request(sent: &[u8]) -> Result<Self, LayoutError> {
+        head_end(sent)?;
+        Ok(Self::revealing(core::iter::once(0..sent.len()), sent.len()))
     }
 
-    /// The token response: the `"access_token":"` delimiter and its closing quote
-    /// are revealed, and everything else -- the bearer included -- is committed.
-    ///
-    /// Those two anchors are what identify the committed bearer. Without them the
-    /// committed range is indistinguishable from a `refresh_token` value, or any
-    /// other substring the prover chose to commit (REQ-PLAT-57, REQ-PLAT-58).
-    pub fn token_response(recv: &[u8]) -> Result<Self, LayoutError> {
-        // Named once, and a constant rather than a parameter. `access_token` is
-        // RFC 6749 section 5.1, not a platform's choice -- which is why the
-        // contract pins `ACCESS_TOKEN_PREFIX` on `TlsNotaryVerifierBase`, shared by
-        // every profile, while the things that ARE platform choices are per-profile
-        // virtuals there and parameters here: the field names of
-        // `Layout::identity_response`.
-        const FIELD: &str = "access_token";
-        let missing = || LayoutError::MissingField(FIELD.into());
-
-        // Through the shared reader rather than a scan of its own. That one locates
-        // the response BODY, so a header carrying this delimiter cannot answer
-        // first, and it refuses a member that chunk framing runs through -- which
-        // this direction cares about most, because the framing would land inside
-        // the committed bearer and the circuit would open a value the token service
-        // never returned.
-        let found = JsonMember::in_response(recv, FIELD).ok_or_else(missing)?;
-
-        // Reveal the two delimiters and let the complement commit the bearer
-        // between them. Both boundaries come from the scan that found the member,
-        // so nothing here restates `"access_token":"` to recompute one.
-        //
-        // An empty bearer is refused: it would leave the two reveals adjacent and
-        // commit nothing, and a response direction with no commitment is one the
-        // framing check on chain finds no bearer in.
-        if found.value.is_empty() {
-            return Err(missing());
-        }
-
-        Ok(Self::revealing(
-            [
-                found.member.start..found.value.start,
-                found.value.end..found.member.end,
-            ],
-            recv.len(),
-        ))
-    }
-
-    /// The identity request: every byte revealed except the bearer value, which is
+    /// The token response: the bearer's anchors revealed, everything else
     /// committed.
-    ///
-    /// The two revealed runs plus the committed one account for the request exactly,
-    /// which is what REQ-COMMON-35 demands and what leaves the committed range as
-    /// the only region the verifier cannot read.
-    pub fn identity_request(sent: &[u8]) -> Result<Self, LayoutError> {
-        const PREFIX: &[u8] = b"\r\nauthorization: Bearer ";
-        let prefix_at = sent
-            .windows(PREFIX.len())
-            .position(|w| w == PREFIX)
-            .ok_or(LayoutError::MissingHeader("authorization"))?;
-        let value_start = prefix_at + PREFIX.len();
-        let value_end = value_start
-            + sent[value_start..]
-                .windows(2)
-                .position(|w| w == b"\r\n")
-                .ok_or(LayoutError::MissingHeader("authorization"))?;
+    pub fn token_response(recv: &[u8]) -> Result<Self, LayoutError> {
+        Ok(Self::revealing(token_bearer(recv)?.anchors(), recv.len()))
+    }
 
+    /// The identity request: everything revealed but the committed bearer.
+    /// Refused unless `sent` is exactly one bodiless request, as the verifier
+    /// requires.
+    pub fn identity_request(sent: &[u8]) -> Result<Self, LayoutError> {
+        let end = head_end(sent)?;
+        if end != sent.len() {
+            return Err(LayoutError::BytesAfterRequest(sent.len() - end));
+        }
+        let bearer = identity_bearer(sent)?;
         Ok(Self::revealing(
-            [0..value_start, value_end..sent.len()],
+            [0..bearer.start, bearer.end..sent.len()],
             sent.len(),
         ))
     }
 
-    /// The identity response: the two identity members with their full delimiters,
-    /// and nothing else.
-    ///
-    /// Each member is revealed whole -- delimiter, value and closing byte -- so the
-    /// verifier reads that field's value rather than a substring of a neighbouring
-    /// one, and so the match sits inside a single revealed run rather than being
-    /// spliced out of several. Everything between and around them is committed.
-    ///
-    /// # What committing the rest costs, and why it is taken
-    ///
-    /// Every reader on the verifying side scans revealed bytes: the per-range field
-    /// read and the cross-range delimiter count alike. A commitment is invisible to
-    /// all of them. So a response that genuinely names an authoritative field twice
-    /// lets a prover commit the real member and reveal the one it composed, and
-    /// both checks then see exactly one. Uniqueness is a property of the document,
-    /// and this establishes it over a part.
-    ///
-    /// Reaching that needs the PLATFORM to emit the duplicate. ASM-PROV-06 assumes
-    /// it does not, and JSON escaping keeps a `","field":"` delimiter out of any
-    /// value the account controls -- a quote inside a string is written `\"`, which
-    /// does not match the template. A duplicate that reaches the REVEALED bytes is
-    /// still caught on chain, in either range layout.
-    ///
-    /// What the commitments buy is that the rest of the response never reaches the
-    /// chain. `GET /user` under an OAuth client holding a `user`-family scope
-    /// returns the account's plan, private-repository counts, disk usage and
-    /// two-factor state; revealing the response whole would publish all of it,
-    /// permanently, for every bind.
-    ///
-    /// `id_field` and `handle_field` are both bare `&str`, and a call that
-    /// transposes them still finds both members, still reveals both, and still
-    /// tiles -- it just names the handle as the account's immutable identifier.
-    /// Nothing downstream sees the swap: the layout is well formed and the
-    /// verifier reads what it was given, so the mistake surfaces on chain as an
-    /// offset rather than as a name. `IdShape` sitting between the two is luck,
-    /// not protection. Both names come from one profile, so keep them together at
-    /// the call site.
-    ///
-    /// The arguments are still taken and still checked. A response missing either
-    /// member is a failure now rather than at the verifier, where the reason would
-    /// be an offset rather than a name.
+    /// The identity response: the anchors of the id and handle revealed, each
+    /// value and everything else committed, keeping the account's other fields
+    /// off chain.
     pub fn identity_response(
         recv: &[u8],
         session: &IdentitySession,
     ) -> Result<Self, LayoutError> {
-        let (id_field, handle_field) = (session.id_field, session.handle_field);
-
-        // The bare-integer form takes its structural terminator with it, which is
-        // what proves the revealed digits are the whole number.
-        let quoted = session.id_shape == IdShape::JsonString;
-        let id = compute_id_snippet_range(recv, id_field, quoted)
-            .ok_or_else(|| LayoutError::MissingField(id_field.into()))?;
-        let handle = compute_field_snippet_range(recv, handle_field)
-            .ok_or_else(|| LayoutError::MissingField(handle_field.into()))?;
+        let IdentityMembers { id, handle } = IdentityMembers::in_response(recv, session)?;
 
         // JSON member order is not fixed; `Self::revealing` sorts, so this does
         // not assume one.
-        Ok(Self::revealing([id, handle], recv.len()))
+        Ok(Self::revealing(
+            id.anchors().into_iter().chain(handle.anchors()),
+            recv.len(),
+        ))
+    }
+}
+
+/// The offset just past the one head boundary (`\r\n\r\n`) of a request,
+/// counting overlapping boundaries as the verifier does.
+fn head_end(sent: &[u8]) -> Result<usize, LayoutError> {
+    const HEAD_END: &[u8] = b"\r\n\r\n";
+    let first = find_first(sent, HEAD_END);
+    let heads = core::iter::successors(first, |&at| {
+        find_first(&sent[at + 1..], HEAD_END).map(|next| at + 1 + next)
+    })
+    .count();
+    match first {
+        Some(at) if heads == 1 => Ok(at + HEAD_END.len()),
+        _ => Err(LayoutError::NoHeadBoundary(heads)),
+    }
+}
+
+/// The bearer's member in every token response (RFC 6749 section 5.1).
+const ACCESS_TOKEN: &str = "access_token";
+
+/// The contract's `BEARER_PREFIX`: the bytes before the identity request's bearer.
+const BEARER_PREFIX: &[u8] = b"\r\nauthorization: Bearer ";
+
+/// The bearer member in a token response's body, offsets into `recv`.
+/// Refused when empty.
+pub fn token_bearer(recv: &[u8]) -> Result<JsonMember, LayoutError> {
+    nonempty(JsonMember::in_response(recv, ACCESS_TOKEN), ACCESS_TOKEN)
+}
+
+/// The bearer in an identity request, offsets into `sent`. Refused when empty.
+pub fn identity_bearer(sent: &[u8]) -> Result<Range<usize>, LayoutError> {
+    const HEADER: &str = "authorization";
+    let start = find_first(sent, BEARER_PREFIX)
+        .ok_or(LayoutError::MissingHeader(HEADER))?
+        + BEARER_PREFIX.len();
+    let end = start
+        + find_first(&sent[start..], b"\r\n")
+            .ok_or(LayoutError::MissingHeader(HEADER))?;
+    if start == end {
+        return Err(LayoutError::EmptyHeader(HEADER));
+    }
+    Ok(start..end)
+}
+
+/// Where the two identity members sit in an identity response.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentityMembers {
+    pub id: JsonMember,
+    pub handle: JsonMember,
+}
+
+impl IdentityMembers {
+    /// Both members of `session`'s profile in `recv`, offsets into `recv`.
+    /// Refused when either value is empty.
+    pub fn in_response(
+        recv: &[u8],
+        session: &IdentitySession,
+    ) -> Result<Self, LayoutError> {
+        let (id_field, handle_field) = (session.id_field, session.handle_field);
+        let id = match session.id_shape {
+            IdShape::JsonString => JsonMember::in_response(recv, id_field),
+            IdShape::JsonInteger => JsonMember::bare_in_response(recv, id_field),
+        };
+        let id = nonempty(id, id_field)?;
+        let handle = nonempty(JsonMember::in_response(recv, handle_field), handle_field)?;
+        Ok(Self { id, handle })
+    }
+}
+
+/// `found`, unless it is absent or its value is empty.
+fn nonempty(found: Option<JsonMember>, field: &str) -> Result<JsonMember, LayoutError> {
+    match found {
+        None => Err(LayoutError::MissingField(field.into())),
+        Some(member) if member.value.is_empty() => {
+            Err(LayoutError::EmptyField(field.into()))
+        }
+        Some(member) => Ok(member),
     }
 }
 
@@ -445,7 +422,15 @@ mod tests {
         // direction that carries no commitment at all.
         let recv: &[u8] = br#"HTTP/1.1 200 OK"#;
         let recv = [recv, b"\r\n\r\n", br#"{"access_token":""}"#].concat();
-        assert!(Layout::token_response(&recv).is_err());
+        assert_eq!(
+            Layout::token_response(&recv),
+            Err(LayoutError::EmptyField("access_token".into()))
+        );
+        let absent = b"HTTP/1.1 200 OK\r\n\r\n{\"token_type\":\"bearer\"}";
+        assert_eq!(
+            token_bearer(absent),
+            Err(LayoutError::MissingField("access_token".into()))
+        );
     }
 
     #[test]
@@ -494,16 +479,22 @@ mod tests {
 
     #[test]
     fn the_x_token_request_is_revealed_whole() {
-        let l = Layout::token_request(X_TOKEN_REQ);
+        let l = Layout::token_request(X_TOKEN_REQ).unwrap();
         assert_eq!(l.reveal, vec![0..X_TOKEN_REQ.len()]);
         assert!(l.commit.is_empty(), "X hides nothing in its token request");
         assert!(tiles(&l, X_TOKEN_REQ.len()));
+        // The verifier locates the body after exactly one head boundary.
+        let headless = &X_TOKEN_REQ[..20];
+        assert_eq!(
+            Layout::token_request(headless),
+            Err(LayoutError::NoHeadBoundary(0))
+        );
     }
 
     #[test]
     fn the_github_exchange_is_revealed_whole() {
         let req: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\n\r\nclient_id=Iv1.x&code=abc&code_verifier=xyz&client_secret=deadbeef";
-        let l = Layout::token_request(req);
+        let l = Layout::token_request(req).unwrap();
         assert_eq!(l.reveal, vec![0..req.len()]);
         assert!(l.commit.is_empty(), "the credential is public and revealed");
         assert!(tiles(&l, req.len()));
@@ -627,6 +618,43 @@ mod tests {
     }
 
     #[test]
+    fn the_identity_request_is_one_request_ending_the_direction() {
+        const ONE: &[u8] =
+            b"GET /2/users/me HTTP/1.1\r\nauthorization: Bearer T\r\nconnection: close\r\n\r\n";
+        assert_eq!(
+            identity_bearer(ONE).map(|bearer| ONE[bearer].to_vec()),
+            Ok(b"T".to_vec())
+        );
+        let trailing = [ONE, b"x"].concat();
+        assert_eq!(
+            Layout::identity_request(&trailing),
+            Err(LayoutError::BytesAfterRequest(1))
+        );
+        // A second request after the first: the platform would answer both,
+        // and the verifier reads one.
+        let two = [ONE, ONE].concat();
+        assert_eq!(
+            Layout::identity_request(&two),
+            Err(LayoutError::NoHeadBoundary(2))
+        );
+        let unterminated = &ONE[..ONE.len() - 2];
+        assert_eq!(
+            Layout::identity_request(unterminated),
+            Err(LayoutError::NoHeadBoundary(0))
+        );
+    }
+
+    #[test]
+    fn an_empty_bearer_header_is_refused() {
+        assert_eq!(
+            Layout::identity_request(
+                b"GET /2/users/me HTTP/1.1\r\nauthorization: Bearer \r\nhost: api.x.com\r\n\r\n"
+            ),
+            Err(LayoutError::EmptyHeader("authorization"))
+        );
+    }
+
+    #[test]
     fn a_request_without_the_credential_header_is_an_error() {
         assert_eq!(
             Layout::identity_request(
@@ -636,43 +664,57 @@ mod tests {
         );
     }
 
+    /// The revealed bytes, in offset order.
+    fn revealed<'a>(l: &Layout, recv: &'a [u8]) -> Vec<&'a [u8]> {
+        l.reveal.iter().map(|r| &recv[r.clone()]).collect()
+    }
+
+    /// The committed bytes, in offset order.
+    fn committed<'a>(l: &Layout, recv: &'a [u8]) -> Vec<&'a [u8]> {
+        l.commit.iter().map(|r| &recv[r.clone()]).collect()
+    }
+
     #[test]
-    fn the_identity_response_reveals_both_members_whole() {
-        let recv: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"data\":{\"id\":\"2244994945\",\"name\":\"Al\",\"username\":\"alice\"}}";
+    fn the_identity_response_reveals_only_the_anchors() {
+        let recv: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"data\":{\"id\":\"2244994945\",\"name\":\"Al\",\"username\":\"Alice_1\"}}";
         let l = Layout::identity_response(recv, &x_identity()).unwrap();
         assert!(tiles(&l, recv.len()));
-        assert_eq!(l.reveal.len(), 2);
-        // Whole members, delimiters included -- so the verifier reads the
-        // field's value and not a substring of the display name beside it.
         assert_eq!(
-            recv[l.reveal[0].clone()].to_vec(),
-            b"\"id\":\"2244994945\"".to_vec()
+            revealed(&l, recv),
+            [&b"\"id\":\""[..], b"\"", b"\"username\":\"", b"\""]
         );
+        // Each value is its own commitment, exactly as the wire carries it.
+        let hidden = committed(&l, recv);
+        assert!(hidden.contains(&&b"2244994945"[..]), "{hidden:?}");
+        assert!(hidden.contains(&&b"Alice_1"[..]), "{hidden:?}");
+    }
+
+    #[test]
+    fn an_empty_value_is_refused() {
+        // Adjacent anchors commit nothing, and the verifier would find no
+        // framed commitment to open.
+        let recv: &[u8] =
+            b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"7\",\"username\":\"\"}}";
         assert_eq!(
-            recv[l.reveal[1].clone()].to_vec(),
-            b"\"username\":\"alice\"".to_vec()
+            Layout::identity_response(recv, &x_identity()),
+            Err(LayoutError::EmptyField("username".into()))
         );
     }
 
     #[test]
-    fn the_github_identity_response_reveals_the_id_with_its_terminator() {
-        // GitHub's id is a BARE integer, so the two members are not the same
-        // shape: `login` closes on a quote, `id` closes on the structural byte
-        // after the digits. That byte is revealed WITH them, because it is what
-        // proves they are the whole number and not a prefix of a longer one --
-        // `CeremonyFields.tryJsonInteger` pins it to `,` or `}` and no other.
+    fn the_github_identity_response_reveals_the_id_terminator_and_commits_the_digits() {
+        // The bare id closes on a revealed `,` or `}`, which proves the
+        // committed digits are the whole number.
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"login\":\"octocat\",\"id\":583231,\"node_id\":\"MDQ=\"}";
         let l = Layout::identity_response(recv, &github_identity()).unwrap();
         assert!(tiles(&l, recv.len()));
-        assert_eq!(l.reveal.len(), 2);
         assert_eq!(
-            recv[l.reveal[0].clone()].to_vec(),
-            b"\"login\":\"octocat\"".to_vec()
+            revealed(&l, recv),
+            [&b"\"login\":\""[..], b"\"", b"\"id\":", b","]
         );
-        assert_eq!(
-            recv[l.reveal[1].clone()].to_vec(),
-            b"\"id\":583231,".to_vec()
-        );
+        let hidden = committed(&l, recv);
+        assert!(hidden.contains(&&b"octocat"[..]), "{hidden:?}");
+        assert!(hidden.contains(&&b"583231"[..]), "{hidden:?}");
     }
 
     #[test]
@@ -684,10 +726,7 @@ mod tests {
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"login\":\"octocat\",\"id\":583231}";
         let l = Layout::identity_response(recv, &github_identity()).unwrap();
         assert!(tiles(&l, recv.len()));
-        assert_eq!(
-            recv[l.reveal[1].clone()].to_vec(),
-            b"\"id\":583231}".to_vec()
-        );
+        assert_eq!(revealed(&l, recv)[2..], [&b"\"id\":"[..], b"}"]);
     }
 
     #[test]
@@ -718,31 +757,21 @@ mod tests {
 
     #[test]
     fn a_response_that_names_the_handle_first_still_reveals_in_offset_order() {
-        // JSON member order is not the platform's promise, and the arguments
-        // are given id-first regardless. `Layout::revealing` is what reconciles
-        // the two: `complement` walks the reveals taking each as starting where
-        // the last one ended, so an unsorted pair reads as overlap and yields a
-        // complement that tiles nothing -- a layout the Platform Verifier
-        // refuses, with no honest ceremony able to produce an accepted one.
-        //
-        // Every other fixture here happens to serialize `id` first, so this is
-        // the one that exercises the sort.
+        // The one fixture with the handle first: it exercises the sort in
+        // `Layout::revealing`.
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"username\":\"alice\",\"id\":\"7\"}";
         let l = Layout::identity_response(recv, &x_identity()).unwrap();
         assert!(tiles(&l, recv.len()));
-        assert_eq!(l.reveal.len(), 2);
-        // Offset order, which here is the OPPOSITE of the argument order.
         assert_eq!(
-            recv[l.reveal[0].clone()].to_vec(),
-            b"\"username\":\"alice\"".to_vec()
+            revealed(&l, recv),
+            [&b"\"username\":\""[..], b"\"", b"\"id\":\"", b"\""]
         );
-        assert_eq!(recv[l.reveal[1].clone()].to_vec(), b"\"id\":\"7\"".to_vec());
     }
 
     #[test]
     fn the_display_name_beside_a_member_stays_committed() {
-        // The point of committing the rest: nothing but the two members and
-        // their delimiters reaches the chain.
+        // The point of committing the rest: nothing but the anchors around the
+        // two values reaches the chain.
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"id\":\"7\",\"name\":\"Al\",\"username\":\"alice\"}";
         let l = Layout::identity_response(recv, &x_identity()).unwrap();
         assert!(tiles(&l, recv.len()));
@@ -755,15 +784,8 @@ mod tests {
         }
     }
 
-    /// The one duplicate this layout cannot defend against, recorded so the
-    /// assumption is visible on the prover side too.
-    ///
-    /// A response naming `username` twice lets the revealed range carry one
-    /// member while the other stays committed, invisible to every reader on
-    /// chain. Reaching it needs the platform to emit that document: ASM-PROV-06
-    /// assumes it does not, and JSON escaping keeps the delimiter out of any
-    /// value the account controls. The layout picks the first match and does
-    /// not detect the second -- stated here rather than left to be discovered.
+    /// A duplicate member stays committed and undetected; ASM-PROV-06 assumes
+    /// the platform never emits one.
     #[test]
     fn a_response_naming_a_member_twice_reveals_only_one() {
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"id\":\"7\",\"username\":\"victim\",\"username\":\"alice\"}";
@@ -780,6 +802,25 @@ mod tests {
             })
             .sum();
         assert_eq!(revealed, 1, "the second member is committed, not revealed");
+        // And the anchors frame the first one.
+        let members = IdentityMembers::in_response(recv, &x_identity()).unwrap();
+        assert_eq!(&recv[members.handle.value], b"victim");
+    }
+
+    #[test]
+    fn a_github_id_s_value_is_the_digits_without_the_whitespace_before_the_comma() {
+        // The whitespace before `,` is revealed with the terminator.
+        let recv: &[u8] =
+            b"HTTP/1.1 200 OK\r\n\r\n{\n  \"login\": \"octocat\",\n  \"id\": 583231 ,\n  \"x\": 1\n}";
+        let members = IdentityMembers::in_response(recv, &github_identity()).unwrap();
+        assert_eq!(&recv[members.id.value.clone()], b"583231");
+        let l = Layout::identity_response(recv, &github_identity()).unwrap();
+        assert!(tiles(&l, recv.len()));
+        assert!(l.commit.contains(&members.id.value));
+        assert!(l
+            .reveal
+            .contains(&(members.id.value.end..members.id.member.end)));
+        assert_eq!(&recv[members.id.value.end..members.id.member.end], b" ,");
     }
 
     #[test]
@@ -847,10 +888,10 @@ mod tables {
             .iter()
             .map(|range| &recv.as_bytes()[range.clone()])
             .collect();
-        assert!(
-            revealed.contains(&&b"\"login\": \"octocat\""[..]),
-            "{revealed:?}"
+        assert_eq!(
+            revealed,
+            [&b"\"login\": \""[..], b"\"", b"\"id\": ", b","],
+            "the anchors carry the whitespace at its offsets"
         );
-        assert!(revealed.contains(&&b"\"id\": 583231,"[..]), "{revealed:?}");
     }
 }

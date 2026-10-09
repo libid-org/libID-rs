@@ -379,7 +379,7 @@ async fn main() {
                     body.as_bytes(),
                 ),
                 |sent, recv| {
-                    Ok((Layout::token_request(sent), Layout::token_response(recv)?))
+                    Ok((Layout::token_request(sent)?, Layout::token_response(recv)?))
                 },
                 &sign,
             )
@@ -446,7 +446,7 @@ async fn main() {
                     body.as_bytes(),
                 ),
                 |sent, recv| {
-                    Ok((Layout::token_request(sent), Layout::token_response(recv)?))
+                    Ok((Layout::token_request(sent)?, Layout::token_response(recv)?))
                 },
                 &sign,
             )
