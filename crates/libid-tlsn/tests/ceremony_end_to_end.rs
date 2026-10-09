@@ -67,6 +67,12 @@ use witness::{
     Held,
 };
 
+/// The server name each session's profile pins: the record's authority.
+const X_TOKEN_HOST: &str = profiles::X.token.unwrap().session.authority;
+const X_ID_HOST: &str = profiles::X.identity.unwrap().session.authority;
+const GITHUB_TOKEN_HOST: &str = profiles::GITHUB.token.unwrap().session.authority;
+const GITHUB_ID_HOST: &str = profiles::GITHUB.identity.unwrap().session.authority;
+
 const TOKEN_SENT: &[u8] = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\n\r\ngrant_type=authorization_code&client_id=abc&code_verifier=5teBDl6cz4U77aFweV5PbMhBJ_lEFv6LLNKzqnDI5lo";
 const TOKEN_RECV: &[u8] =
     b"HTTP/1.1 200 OK\r\n\r\n{\"token_type\":\"bearer\",\"access_token\":\"SECRETBEARER\"}";
@@ -104,7 +110,14 @@ fn blinder(direction: Direction, index: usize) -> Blinder {
 /// commitment per hidden run. Each commitment is tlsn's `PlaintextHash`, from
 /// tlsn's `hash_plaintext` over the committed bytes and a tlsn [`Blinder`];
 /// the prover keeps the blinder as a [`CommitmentOpening`].
-fn record(sent: &[u8], recv: &[u8], sl: &Layout, rl: &Layout, created_at: u64) -> Held {
+fn record(
+    sent: &[u8],
+    recv: &[u8],
+    sl: &Layout,
+    rl: &Layout,
+    authority: &str,
+    created_at: u64,
+) -> Held {
     let transcript = Transcript::new(sent, recv);
     let partial = transcript.to_partial(
         RangeSet::from(sl.reveal.clone()),
@@ -135,7 +148,7 @@ fn record(sent: &[u8], recv: &[u8], sl: &Layout, rl: &Layout, created_at: u64) -
 
     let record = AttestedData::from_observed(ObservedSession {
         transcript: &partial,
-        authority: "api.x.com",
+        authority,
         commitments: &commitments,
         created_at,
     })
@@ -318,7 +331,15 @@ fn covered<'a>(recv: &'a [u8], c: &RangeCommitment) -> &'a [u8] {
 fn the_token_session_produces_a_record_the_verifier_accepts() {
     let sl = Layout::token_request(TOKEN_SENT).unwrap();
     let rl = Layout::token_response(TOKEN_RECV).unwrap();
-    let data = record(TOKEN_SENT, TOKEN_RECV, &sl, &rl, 1_770_000_000).record;
+    let data = record(
+        TOKEN_SENT,
+        TOKEN_RECV,
+        &sl,
+        &rl,
+        X_TOKEN_HOST,
+        1_770_000_000,
+    )
+    .record;
 
     assert_tiles(&data.sent, data.sent_transcript_length, "token request");
     assert_tiles(
@@ -354,7 +375,7 @@ fn the_token_session_produces_a_record_the_verifier_accepts() {
 fn the_identity_session_produces_a_record_the_verifier_accepts() {
     let sl = Layout::identity_request(ID_SENT).unwrap();
     let rl = Layout::identity_response(ID_RECV, &profiles::X.identity.unwrap()).unwrap();
-    let data = record(ID_SENT, ID_RECV, &sl, &rl, 1_770_000_000).record;
+    let data = record(ID_SENT, ID_RECV, &sl, &rl, X_ID_HOST, 1_770_000_000).record;
 
     assert_tiles(&data.sent, data.sent_transcript_length, "identity request");
     assert_tiles(
@@ -491,6 +512,7 @@ fn the_identity_link_witness_opens_the_records() {
         TOKEN_RECV,
         &Layout::token_request(TOKEN_SENT).unwrap(),
         &Layout::token_response(TOKEN_RECV).unwrap(),
+        X_TOKEN_HOST,
         1_770_000_000,
     );
     let x_identity = record(
@@ -498,6 +520,7 @@ fn the_identity_link_witness_opens_the_records() {
         ID_RECV,
         &Layout::identity_request(ID_SENT).unwrap(),
         &Layout::identity_response(ID_RECV, &profiles::X.identity.unwrap()).unwrap(),
+        X_ID_HOST,
         1_770_000_000,
     );
     assert_the_witness_opens_the_record(&profiles::X, &x_token, &x_identity);
@@ -507,6 +530,7 @@ fn the_identity_link_witness_opens_the_records() {
         GITHUB_TOKEN_RECV,
         &Layout::token_request(GITHUB_TOKEN_SENT).unwrap(),
         &Layout::token_response(GITHUB_TOKEN_RECV).unwrap(),
+        GITHUB_TOKEN_HOST,
         1_770_000_000,
     );
     let github_identity = record(
@@ -515,6 +539,7 @@ fn the_identity_link_witness_opens_the_records() {
         &Layout::identity_request(GITHUB_ID_SENT).unwrap(),
         &Layout::identity_response(GITHUB_ID_RECV, &profiles::GITHUB.identity.unwrap())
             .unwrap(),
+        GITHUB_ID_HOST,
         1_770_000_000,
     );
     assert_the_witness_opens_the_record(
@@ -543,21 +568,23 @@ fn the_identity_link_witness_opens_the_records() {
 /// the notary signs and what the Solidity decoder reads.
 #[test]
 fn both_sessions_encode_and_carry_their_own_lengths() {
-    for (sent, recv, sl, rl) in [
+    for (sent, recv, sl, rl, authority) in [
         (
             TOKEN_SENT,
             TOKEN_RECV,
             Layout::token_request(TOKEN_SENT).unwrap(),
             Layout::token_response(TOKEN_RECV).unwrap(),
+            X_TOKEN_HOST,
         ),
         (
             ID_SENT,
             ID_RECV,
             Layout::identity_request(ID_SENT).unwrap(),
             Layout::identity_response(ID_RECV, &profiles::X.identity.unwrap()).unwrap(),
+            X_ID_HOST,
         ),
     ] {
-        let data = record(sent, recv, &sl, &rl, 1_770_000_000).record;
+        let data = record(sent, recv, &sl, &rl, authority, 1_770_000_000).record;
         assert_eq!(data.sent_transcript_length as usize, sent.len());
         assert_eq!(data.recv_transcript_length as usize, recv.len());
         let encoded = data.encode().expect("encodes");
@@ -576,7 +603,7 @@ fn the_github_exchange_is_revealed_whole() {
 
     let sl = Layout::token_request(SENT).unwrap();
     let rl = Layout::token_response(RECV).unwrap();
-    let data = record(SENT, RECV, &sl, &rl, 1_770_000_000).record;
+    let data = record(SENT, RECV, &sl, &rl, GITHUB_TOKEN_HOST, 1_770_000_000).record;
 
     assert_tiles(&data.sent, data.sent_transcript_length, "github exchange");
     assert_eq!(data.sent.revealed.len(), 1);
