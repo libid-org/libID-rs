@@ -202,21 +202,6 @@ fn openings_json(openings: &[CommitmentOpening]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// The identity-link witness of the two sessions, which the fixture carries
-/// for the circuit's tests. Its commitments are checked against these records,
-/// whose hashes this generator computed with tlsn's hasher: a check of the two
-/// sides agreeing on `SHA256(value || blinder)`, not of tlsn's MPC protocol.
-/// `tests/ceremony_end_to_end.rs` checks the helper against tlsn's own
-/// commitment hash.
-fn witness_json(
-    profile: &libid_transcript::ceremony::Profile,
-    token: &Held,
-    identity: &Held,
-) -> serde_json::Value {
-    identity_link_witness(profile, token, identity)
-        .unwrap_or_else(|e| panic!("identity-link witness: {e}"))
-}
-
 /// `prover_generic`'s reveal and commit configuration, then the verifier's
 /// record construction, with tlsn's own commitment hashes in between.
 fn build(
@@ -318,8 +303,6 @@ fn build(
 
 fn session_json(
     endpoint: &str,
-    sent: &[u8],
-    recv: &[u8],
     held: &Held,
     sign: &dyn Fn(&[u8; 32]) -> Vec<u8>,
 ) -> serde_json::Value {
@@ -327,8 +310,8 @@ fn session_json(
     let signature = sign(&keccak256(&attested));
     json!({
         "endpoint": endpoint,
-        "sent": hex0x(sent),
-        "received": hex0x(recv),
+        "sent": hex0x(&held.sent),
+        "received": hex0x(&held.recv),
         "attested_data": hex0x(&attested),
         "notary_signature": hex0x(&signature),
         "openings": openings_json(&held.openings),
@@ -396,17 +379,11 @@ async fn main() {
         "x token",
         &sent,
         &recv,
-        &Layout::token_request(&sent),
+        &Layout::token_request(&sent).expect("token request layout"),
         &Layout::token_response(&recv).expect("x token response layout"),
         "api.x.com",
     );
-    let x_token = session_json(
-        "https://api.x.com/2/oauth2/token",
-        &sent,
-        &recv,
-        &token,
-        &sign,
-    );
+    let x_token = session_json("https://api.x.com/2/oauth2/token", &token, &sign);
 
     let recv = answer(
         "application/json;charset=utf-8",
@@ -441,19 +418,17 @@ async fn main() {
             .expect("x identity response layout"),
         "api.x.com",
     );
-    let x_identity = session_json(
-        "https://api.x.com/2/users/me",
-        &sent,
-        &recv,
-        &identity,
-        &sign,
-    );
+    let x_identity = session_json("https://api.x.com/2/users/me", &identity, &sign);
 
-    let witness = witness_json(&x, &token, &identity);
     let mut file = common("x");
     file["token"] = x_token;
     file["identity"] = x_identity;
-    file["identity_link_witness"] = witness;
+    // For the circuit's tests. Its commitments are checked against these
+    // records, whose hashes this generator computed with tlsn's hasher;
+    // `tests/ceremony_end_to_end.rs` checks the helper against tlsn's own
+    // commitment hash.
+    file["identity_link_witness"] =
+        identity_link_witness(&x, &token, &identity).expect("x identity-link witness");
     std::fs::write(
         out.join("x-ceremony-session.json"),
         serde_json::to_string_pretty(&file).unwrap() + "\n",
@@ -500,17 +475,12 @@ async fn main() {
         "github token",
         &sent,
         &recv,
-        &Layout::token_request(&sent),
+        &Layout::token_request(&sent).expect("token request layout"),
         &Layout::token_response(&recv).expect("github token response layout"),
         "github.com",
     );
-    let github_token = session_json(
-        "https://github.com/login/oauth/access_token",
-        &sent,
-        &recv,
-        &token,
-        &sign,
-    );
+    let github_token =
+        session_json("https://github.com/login/oauth/access_token", &token, &sign);
 
     // As GitHub serves `/user` for the media type the profile pins: pretty
     // printed, a newline and two spaces before every member and a space after
@@ -551,19 +521,13 @@ async fn main() {
             .expect("github identity response layout"),
         "api.github.com",
     );
-    let github_identity = session_json(
-        "https://api.github.com/user",
-        &sent,
-        &recv,
-        &identity,
-        &sign,
-    );
+    let github_identity = session_json("https://api.github.com/user", &identity, &sign);
 
-    let witness = witness_json(&github, &token, &identity);
     let mut file = common("github");
     file["token"] = github_token;
     file["identity"] = github_identity;
-    file["identity_link_witness"] = witness;
+    file["identity_link_witness"] = identity_link_witness(&github, &token, &identity)
+        .expect("github identity-link witness");
     std::fs::write(
         out.join("github-ceremony-session.json"),
         serde_json::to_string_pretty(&file).unwrap() + "\n",

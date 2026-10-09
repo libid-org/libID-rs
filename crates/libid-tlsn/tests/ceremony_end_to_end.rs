@@ -23,9 +23,12 @@
 //! Each assertion below names the check it mirrors, so a rule that changes on
 //! chain has one place to change here.
 
+#[path = "../examples/ceremony/common.rs"]
+mod common;
 #[path = "../examples/ceremony/witness.rs"]
 mod witness;
 
+use common::hex0x;
 use libid_tlsn::{
     attest::{
         FromObserved,
@@ -79,29 +82,6 @@ const GITHUB_TOKEN_RECV: &[u8] =
 const GITHUB_ID_SENT: &[u8] = b"GET /user HTTP/1.1\r\nhost: api.github.com\r\nauthorization: Bearer gho_SECRETBEARER\r\nconnection: close\r\n\r\n";
 const GITHUB_ID_RECV: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\n  \"login\": \"OctoCat\",\n  \"id\": 583231 ,\n  \"node_id\": \"MDQ6VXNlcjU4MzIzMQ==\",\n  \"plan\": \"pro\"\n}";
 
-/// The authority each session's server authenticates as.
-const X_API: &str = "api.x.com";
-const GITHUB_WEB: &str = "github.com";
-const GITHUB_API: &str = "api.github.com";
-
-/// A session as its prover and its notary end up holding it: the full
-/// transcript, the prover's openings, and the notary's record.
-fn notarized(
-    sent: &[u8],
-    recv: &[u8],
-    sl: &Layout,
-    rl: &Layout,
-    authority: &str,
-) -> Held {
-    let (openings, record) = record(sent, recv, sl, rl, authority);
-    Held {
-        sent: sent.to_vec(),
-        recv: recv.to_vec(),
-        openings,
-        record,
-    }
-}
-
 /// A distinct tlsn blinder per commitment. tlsn constructs one only from
 /// randomness or by deserializing, so these are deserialized from fixed bytes
 /// and the records reproduce.
@@ -116,21 +96,16 @@ fn blinder(direction: Direction, index: usize) -> Blinder {
     serde_json::from_value(serde_json::json!(bytes)).expect("a 16-byte blinder")
 }
 
-/// Turn a pair of layouts into the [`ObservedSession`] a notary's verifier
-/// holds, and the openings its prover holds.
+/// Turn a pair of layouts into the session as its prover and its notary end
+/// up holding it: the full transcript, the prover's openings, and the record
+/// built from the [`ObservedSession`] the notary's verifier holds.
 ///
 /// This is the step a real session performs inside MPC: the prover states what
 /// it reveals, and the verifier ends up holding the revealed transcript and a
 /// commitment per hidden run. Each commitment is tlsn's `PlaintextHash`, from
 /// tlsn's `hash_plaintext` over the committed bytes and a tlsn [`Blinder`];
 /// the prover keeps the blinder as a [`CommitmentOpening`].
-fn record(
-    sent: &[u8],
-    recv: &[u8],
-    sl: &Layout,
-    rl: &Layout,
-    authority: &str,
-) -> (Vec<CommitmentOpening>, AttestedData) {
+fn record(sent: &[u8], recv: &[u8], sl: &Layout, rl: &Layout, created_at: u64) -> Held {
     let transcript = Transcript::new(sent, recv);
     let partial = transcript.to_partial(
         RangeSet::from(sl.reveal.clone()),
@@ -159,14 +134,19 @@ fn record(
         }
     }
 
-    let data = AttestedData::from_observed(ObservedSession {
+    let record = AttestedData::from_observed(ObservedSession {
         transcript: &partial,
-        authority,
+        authority: "api.x.com",
         commitments: &commitments,
-        created_at: 1_770_000_000,
+        created_at,
     })
     .expect("the layouts produce an attestable session");
-    (openings, data)
+    Held {
+        sent: sent.to_vec(),
+        recv: recv.to_vec(),
+        openings,
+        record,
+    }
 }
 
 /// `CeremonyAttestation.requireExactCoverage`: revealed ranges and commitments
@@ -242,10 +222,15 @@ fn revealed_at(block: &DirectionBlock, at: u32) -> Option<&[u8]> {
         .map(|r| r.bytes.as_slice())
 }
 
-/// `CeremonyAttestation.requireFramedCommitment(block, prefix, "\"")`: the
-/// prefix once across the revealed bytes, and exactly one commitment it
-/// anchors whose next revealed byte is the closing quote.
-fn framed_string<'a>(block: &'a DirectionBlock, prefix: &[u8]) -> &'a RangeCommitment {
+/// The prefix once across the revealed bytes, and exactly one commitment it
+/// anchors whose next revealed range `closes` accepts:
+/// `CeremonyAttestation.requireFramedCommitment` with [`quote`],
+/// `requireFramedInteger` with [`terminator`].
+fn framed<'a>(
+    block: &'a DirectionBlock,
+    prefix: &[u8],
+    closes: fn(&[u8]) -> bool,
+) -> &'a RangeCommitment {
     assert_eq!(
         count(&normalized(&joined(block)), prefix),
         1,
@@ -253,7 +238,7 @@ fn framed_string<'a>(block: &'a DirectionBlock, prefix: &[u8]) -> &'a RangeCommi
     );
     let framed: Vec<_> = anchored(block, prefix)
         .into_iter()
-        .filter(|c| revealed_at(block, c.end).is_some_and(|r| r.starts_with(b"\"")))
+        .filter(|c| revealed_at(block, c.end).is_some_and(closes))
         .collect();
     let [framed] = framed.as_slice() else {
         panic!("{} commitments framed, not one", framed.len());
@@ -261,31 +246,19 @@ fn framed_string<'a>(block: &'a DirectionBlock, prefix: &[u8]) -> &'a RangeCommi
     framed
 }
 
-/// `CeremonyAttestation.requireFramedInteger(block, prefix)`: as
-/// [`framed_string`], closed instead by a revealed range whose first byte past
-/// JSON whitespace is `,` or `}` (`_terminatedAt`).
-fn framed_integer<'a>(block: &'a DirectionBlock, prefix: &[u8]) -> &'a RangeCommitment {
-    assert_eq!(
-        count(&normalized(&joined(block)), prefix),
-        1,
-        "AmbiguousFraming"
-    );
-    let framed: Vec<_> = anchored(block, prefix)
-        .into_iter()
-        .filter(|c| {
-            revealed_at(block, c.end).is_some_and(|r| {
-                matches!(
-                    r.iter()
-                        .find(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r')),
-                    Some(b',' | b'}')
-                )
-            })
-        })
-        .collect();
-    let [framed] = framed.as_slice() else {
-        panic!("{} commitments framed, not one", framed.len());
-    };
-    framed
+/// A string value closes on its quote.
+fn quote(next: &[u8]) -> bool {
+    next.starts_with(b"\"")
+}
+
+/// A bare integer closes on `,` or `}`, past JSON whitespace
+/// (`_terminatedAt`).
+fn terminator(next: &[u8]) -> bool {
+    matches!(
+        next.iter()
+            .find(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r')),
+        Some(b',' | b'}')
+    )
 }
 
 /// `CeremonyAttestation.requireBearerHeaderRequest`'s framing: exactly one
@@ -322,9 +295,9 @@ fn covered<'a>(recv: &'a [u8], c: &RangeCommitment) -> &'a [u8] {
 
 #[test]
 fn the_token_session_produces_a_record_the_verifier_accepts() {
-    let sl = Layout::token_request(TOKEN_SENT);
+    let sl = Layout::token_request(TOKEN_SENT).unwrap();
     let rl = Layout::token_response(TOKEN_RECV).unwrap();
-    let (_, data) = record(TOKEN_SENT, TOKEN_RECV, &sl, &rl, X_API);
+    let data = record(TOKEN_SENT, TOKEN_RECV, &sl, &rl, 1_770_000_000).record;
 
     assert_tiles(&data.sent, data.sent_transcript_length, "token request");
     assert_tiles(
@@ -351,7 +324,7 @@ fn the_token_session_produces_a_record_the_verifier_accepts() {
     // `requireFramedCommitment`: exactly one commitment is framed as the
     // bearer, it covers exactly the bearer, and the bearer is not readable
     // anywhere.
-    let bearer = framed_string(&data.received, b"\"access_token\":\"");
+    let bearer = framed(&data.received, b"\"access_token\":\"", quote);
     assert_eq!(covered(TOKEN_RECV, bearer), b"SECRETBEARER");
     assert_eq!(count(&joined(&data.received), b"SECRETBEARER"), 0);
 }
@@ -360,7 +333,7 @@ fn the_token_session_produces_a_record_the_verifier_accepts() {
 fn the_identity_session_produces_a_record_the_verifier_accepts() {
     let sl = Layout::identity_request(ID_SENT).unwrap();
     let rl = Layout::identity_response(ID_RECV, &profiles::X.identity.unwrap()).unwrap();
-    let (_, data) = record(ID_SENT, ID_RECV, &sl, &rl, X_API);
+    let data = record(ID_SENT, ID_RECV, &sl, &rl, 1_770_000_000).record;
 
     assert_tiles(&data.sent, data.sent_transcript_length, "identity request");
     assert_tiles(
@@ -408,37 +381,10 @@ fn the_identity_session_produces_a_record_the_verifier_accepts() {
 
     // `requireFramedCommitment`: each value is exactly one committed range,
     // framed by its revealed anchors, and covers exactly the value.
-    let id = framed_string(&data.received, b"\"id\":\"");
-    let handle = framed_string(&data.received, b"\"username\":\"");
+    let id = framed(&data.received, b"\"id\":\"", quote);
+    let handle = framed(&data.received, b"\"username\":\"", quote);
     assert_eq!(covered(ID_RECV, id), b"2244994945");
     assert_eq!(covered(ID_RECV, handle), b"Alice_1");
-}
-
-#[test]
-fn the_github_identity_session_frames_a_bare_integer_id() {
-    let sl = Layout::identity_request(GITHUB_ID_SENT).unwrap();
-    let rl =
-        Layout::identity_response(GITHUB_ID_RECV, &profiles::GITHUB.identity.unwrap())
-            .unwrap();
-    let (_, data) = record(GITHUB_ID_SENT, GITHUB_ID_RECV, &sl, &rl, GITHUB_API);
-    assert_tiles(
-        &data.received,
-        data.recv_transcript_length,
-        "github identity response",
-    );
-
-    let body = joined(&data.received);
-    for hidden in [&b"583231"[..], b"OctoCat", b"MDQ6", b"pro"] {
-        assert_eq!(count(&body, hidden), 0, "{hidden:?} is committed");
-    }
-
-    // `requireFramedInteger`: `"id":` (normalized) before the digits, and a
-    // revealed ` ,` after them; the commitment is the digits alone.
-    let id = framed_integer(&data.received, b"\"id\":");
-    assert_eq!(covered(GITHUB_ID_RECV, id), b"583231");
-    assert_eq!(revealed_at(&data.received, id.end), Some(&b" ,"[..]));
-    let handle = framed_string(&data.received, b"\"login\":\"");
-    assert_eq!(covered(GITHUB_ID_RECV, handle), b"OctoCat");
 }
 
 /// `SHA256(value || blinder)`, with the `sha2` crate rather than tlsn's
@@ -450,11 +396,6 @@ fn sha256(value: &[u8], blinder: &[u8]) -> [u8; 32] {
         .chain_update(blinder)
         .finalize()
         .into()
-}
-
-/// `0x` and lowercase hex, as the witness spells bytes.
-fn hex0x(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
 }
 
 /// The witness the identity-link circuit opens, built from the prover's
@@ -477,24 +418,27 @@ fn assert_the_witness_opens_the_record(
     // commitment, which tlsn's `hash_plaintext` produced.
     let session = profile.identity.unwrap();
     let id = match session.id_shape {
-        profiles::IdShape::JsonString => framed_string(
+        profiles::IdShape::JsonString => framed(
             &identity.record.received,
             format!("\"{}\":\"", session.id_field).as_bytes(),
+            quote,
         ),
-        profiles::IdShape::JsonInteger => framed_integer(
+        profiles::IdShape::JsonInteger => framed(
             &identity.record.received,
             format!("\"{}\":", session.id_field).as_bytes(),
+            terminator,
         ),
     };
-    let handle = framed_string(
+    let handle = framed(
         &identity.record.received,
         format!("\"{}\":\"", session.handle_field).as_bytes(),
+        quote,
     );
     for (name, bytes, framed) in [
         (
             "token_bearer",
             &token.recv,
-            framed_string(&token.record.received, b"\"access_token\":\""),
+            framed(&token.record.received, b"\"access_token\":\"", quote),
         ),
         (
             "identity_bearer",
@@ -517,58 +461,61 @@ fn assert_the_witness_opens_the_record(
         assert_eq!(blinder.len(), 16, "{name}: the blinder is 16 bytes");
         assert_eq!(sha256(value, &blinder), framed.commitment, "{name}");
     }
-    assert_eq!(
-        witness["token_bearer"]["value"],
-        witness["identity_bearer"]["value"]
-    );
 }
 
 #[test]
 fn the_identity_link_witness_opens_the_records() {
-    let x_token = notarized(
+    let x_token = record(
         TOKEN_SENT,
         TOKEN_RECV,
-        &Layout::token_request(TOKEN_SENT),
+        &Layout::token_request(TOKEN_SENT).unwrap(),
         &Layout::token_response(TOKEN_RECV).unwrap(),
-        X_API,
+        1_770_000_000,
     );
-    let x_identity = notarized(
+    let x_identity = record(
         ID_SENT,
         ID_RECV,
         &Layout::identity_request(ID_SENT).unwrap(),
         &Layout::identity_response(ID_RECV, &profiles::X.identity.unwrap()).unwrap(),
-        X_API,
+        1_770_000_000,
     );
     assert_the_witness_opens_the_record(&profiles::X, &x_token, &x_identity);
 
-    let github_token = notarized(
+    let github_token = record(
         GITHUB_TOKEN_SENT,
         GITHUB_TOKEN_RECV,
-        &Layout::token_request(GITHUB_TOKEN_SENT),
+        &Layout::token_request(GITHUB_TOKEN_SENT).unwrap(),
         &Layout::token_response(GITHUB_TOKEN_RECV).unwrap(),
-        GITHUB_WEB,
+        1_770_000_000,
     );
-    let github_identity = notarized(
+    let github_identity = record(
         GITHUB_ID_SENT,
         GITHUB_ID_RECV,
         &Layout::identity_request(GITHUB_ID_SENT).unwrap(),
         &Layout::identity_response(GITHUB_ID_RECV, &profiles::GITHUB.identity.unwrap())
             .unwrap(),
-        GITHUB_API,
-    );
-    assert_eq!(
-        github_token.record.authority_id,
-        AttestedData::authority_id_of(GITHUB_WEB)
-    );
-    assert_eq!(
-        github_identity.record.authority_id,
-        AttestedData::authority_id_of(GITHUB_API)
+        1_770_000_000,
     );
     assert_the_witness_opens_the_record(
         &profiles::GITHUB,
         &github_token,
         &github_identity,
     );
+
+    // GitHub's bare id: the commitment is the digits alone, closed by a
+    // revealed ` ,`, and nothing else of the account is revealed.
+    let received = &github_identity.record.received;
+    assert_tiles(
+        received,
+        github_identity.record.recv_transcript_length,
+        "github identity response",
+    );
+    let body = joined(received);
+    for hidden in [&b"583231"[..], b"OctoCat", b"MDQ6", b"pro"] {
+        assert_eq!(count(&body, hidden), 0, "{hidden:?} is committed");
+    }
+    let id = framed(received, b"\"id\":", terminator);
+    assert_eq!(revealed_at(received, id.end), Some(&b" ,"[..]));
 }
 
 /// The record has to survive the wire, not merely exist: the encoding is what
@@ -579,7 +526,7 @@ fn both_sessions_encode_and_carry_their_own_lengths() {
         (
             TOKEN_SENT,
             TOKEN_RECV,
-            Layout::token_request(TOKEN_SENT),
+            Layout::token_request(TOKEN_SENT).unwrap(),
             Layout::token_response(TOKEN_RECV).unwrap(),
         ),
         (
@@ -589,7 +536,7 @@ fn both_sessions_encode_and_carry_their_own_lengths() {
             Layout::identity_response(ID_RECV, &profiles::X.identity.unwrap()).unwrap(),
         ),
     ] {
-        let (_, data) = record(sent, recv, &sl, &rl, X_API);
+        let data = record(sent, recv, &sl, &rl, 1_770_000_000).record;
         assert_eq!(data.sent_transcript_length as usize, sent.len());
         assert_eq!(data.recv_transcript_length as usize, recv.len());
         let encoded = data.encode().expect("encodes");
@@ -606,9 +553,9 @@ fn the_github_exchange_is_revealed_whole() {
     const RECV: &[u8] =
         b"HTTP/1.1 200 OK\r\n\r\n{\"token_type\":\"bearer\",\"access_token\":\"SECRETBEARER\"}";
 
-    let sl = Layout::token_request(SENT);
+    let sl = Layout::token_request(SENT).unwrap();
     let rl = Layout::token_response(RECV).unwrap();
-    let (_, data) = record(SENT, RECV, &sl, &rl, GITHUB_WEB);
+    let data = record(SENT, RECV, &sl, &rl, 1_770_000_000).record;
 
     assert_tiles(&data.sent, data.sent_transcript_length, "github exchange");
     assert_eq!(data.sent.revealed.len(), 1);

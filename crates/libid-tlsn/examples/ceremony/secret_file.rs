@@ -3,8 +3,6 @@
 //! Included by `#[path]` from `capture_ceremony` and from
 //! `tests/secret_file.rs`; not an example of its own.
 
-#![allow(dead_code)]
-
 use std::{
     io::Write as _,
     path::Path,

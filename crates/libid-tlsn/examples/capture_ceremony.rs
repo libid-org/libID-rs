@@ -63,6 +63,7 @@ mod witness;
 
 use std::{
     path::PathBuf,
+    sync::OnceLock,
     time::{
         SystemTime,
         UNIX_EPOCH,
@@ -90,9 +91,9 @@ use libid_transcript::{
     ceremony::{
         form_encode,
         profiles,
+        token_bearer,
         token_body,
         Layout,
-        TokenMembers,
     },
 };
 use serde_json::json;
@@ -105,6 +106,7 @@ use tokio::{
     net::TcpListener,
 };
 use witness::{
+    ascii,
     identity_link_witness,
     Held,
 };
@@ -205,20 +207,11 @@ fn now() -> u64 {
 
 /// Wait for the browser's redirect on `listener` and return the code it
 /// carries.
-async fn receive_code(
-    listener: TcpListener,
-    expected_state: &str,
-) -> Result<String, String> {
+async fn receive_code(listener: TcpListener, expected_state: &str) -> String {
     loop {
-        let (mut socket, _) = listener
-            .accept()
-            .await
-            .map_err(|e| format!("accepting the redirect: {e}"))?;
+        let (mut socket, _) = listener.accept().await.expect("accept");
         let mut buf = vec![0u8; 8192];
-        let n = socket
-            .read(&mut buf)
-            .await
-            .map_err(|e| format!("reading the redirect: {e}"))?;
+        let n = socket.read(&mut buf).await.expect("read");
         let head = String::from_utf8_lossy(&buf[..n]).into_owned();
         let line = head.lines().next().unwrap_or("").to_owned();
         let target = line.split(' ').nth(1).unwrap_or("");
@@ -249,23 +242,22 @@ async fn receive_code(
         socket
             .write_all(response.as_bytes())
             .await
-            .map_err(|e| format!("answering the redirect: {e}"))?;
+            .expect("respond");
         socket.shutdown().await.ok();
-        if let (Some(code), true) = (code, status.starts_with("200")) {
-            return Ok(code);
+        if status.starts_with("200") {
+            return code.expect("code");
         }
         eprintln!("ignored a request without the expected code and state: {line}");
     }
 }
 
 struct Session {
-    record: Vec<u8>,
     signature: Vec<u8>,
     created_at: u64,
     authority: String,
     /// Both directions in full, the openings and the record, as the prover
-    /// holds them. The witness is built from them; the public record never
-    /// carries them.
+    /// holds them. The witness is built from them; the public record carries
+    /// only the record.
     held: Held,
 }
 
@@ -320,10 +312,8 @@ async fn notarize(
         commitments: &observed.transcript_commitments,
         created_at,
     })
-    .map_err(|e| format!("the attested-data record: {e}"))?;
-    let record = data
-        .encode()
-        .map_err(|e| format!("encoding the record: {e}"))?;
+    .expect("record");
+    let record = data.encode().expect("encode");
     let signature = sign(&keccak256(&record));
     eprintln!(
         "  record: {} bytes, sent {} revealed / {} committed, received {} revealed / {} committed, authority {authority}",
@@ -334,7 +324,6 @@ async fn notarize(
         data.received.commitments.len()
     );
     Ok(Session {
-        record,
         signature,
         created_at,
         authority,
@@ -347,8 +336,15 @@ async fn notarize(
     })
 }
 
+/// Set when the token session starts: from then on a token may have been
+/// issued, and every exit says to revoke it.
+static REVOKE: OnceLock<String> = OnceLock::new();
+
 fn fail(message: String) -> ! {
     eprintln!("error: {message}");
+    if let Some(revoke) = REVOKE.get() {
+        eprintln!("{revoke}");
+    }
     std::process::exit(1)
 }
 
@@ -366,7 +362,7 @@ fn session_json(endpoint: &str, session: &Session) -> serde_json::Value {
         "endpoint": endpoint,
         "authority": session.authority,
         "created_at": session.created_at,
-        "attested_data": hex0x(&session.record),
+        "attested_data": hex0x(&session.held.record.encode().expect("encode")),
         "notary_signature": hex0x(&session.signature),
     })
 }
@@ -389,42 +385,7 @@ fn request(
 #[tokio::main]
 async fn main() {
     let args = args();
-    let (record, witness) = run(&args).await.unwrap_or_else(|e| {
-        fail(format!(
-            "{e}\nIf the token session ran, revoke the app's access in {}'s authorized-apps \
-             settings.",
-            args.platform
-        ))
-    });
-    let path = args
-        .witness_out
-        .clone()
-        .unwrap_or_else(|| default_witness_path(&args.platform));
-    let json = serde_json::to_string_pretty(&witness).expect("witness JSON") + "\n";
-    if let Err(e) = secret_file::write_new(&path, json.as_bytes()) {
-        fail(format!(
-            "the witness: {e}. The public record {} is kept. Revoke the app's access in {}'s \
-             authorized-apps settings",
-            record.display(),
-            args.platform
-        ));
-    }
-    println!(
-        "wrote {} (owner-only, secret: the live bearer until you revoke the token, and \
-         blinders that link the commitments to the account for good).\n\
-         Build the circuit's input outside every repository with \
-         libID-circuits/scripts/identity-link-witness.py, then delete the witness and revoke \
-         the app's access in {}'s authorized-apps settings.",
-        path.display(),
-        args.platform
-    );
-}
-
-/// The consent, both sessions and the public record; the record's path and
-/// the witness to write.
-async fn run(args: &Args) -> Result<(PathBuf, serde_json::Value), String> {
-    std::fs::create_dir_all(&args.out)
-        .map_err(|e| format!("the output directory {}: {e}", args.out.display()))?;
+    std::fs::create_dir_all(&args.out).expect("output directory");
     let key = hex_to_signing_key(NOTARY_KEY).expect("notary key");
     let notary = hex0x(&pubkey_to_eth_address(key.verifying_key()));
     let sign = |digest: &[u8; 32]| sign_eth_claim(&key, digest).expect("sign");
@@ -450,18 +411,23 @@ async fn run(args: &Args) -> Result<(PathBuf, serde_json::Value), String> {
     );
     // Bound before the URL is printed: a consent given while nothing listens
     // is a code lost.
-    let listener = TcpListener::bind(&args.listen).await.map_err(|e| {
-        format!(
+    let listener = TcpListener::bind(&args.listen).await.unwrap_or_else(|e| {
+        fail(format!(
             "binding the redirect listener on {}: {e}. Stop whatever holds the port, or pass \
              `--listen` and the matching `--redirect-uri` registered on the app",
             args.listen
-        )
-    })?;
+        ))
+    });
     eprintln!("\nOpen this URL, log in, and consent:\n\n{url}\n\nWaiting for the redirect on {} ...", args.listen);
-    let code = receive_code(listener, &state).await?;
+    let code = receive_code(listener, &state).await;
     eprintln!("code received; running the token session");
+    let revoke = format!(
+        "Revoke the app's access in {}'s authorized-apps settings: the token is live until then.",
+        args.platform
+    );
+    REVOKE.set(revoke).expect("set once");
 
-    let (profile, endpoints, token, identity) = match args.platform.as_str() {
+    let (profile, token, identity, held) = match args.platform.as_str() {
         "x" => {
             let profile = profiles::X;
             let body = token_body(
@@ -473,7 +439,7 @@ async fn run(args: &Args) -> Result<(PathBuf, serde_json::Value), String> {
                     ("code_verifier", &verifier),
                 ],
             )
-            .map_err(|e| e.to_string())?;
+            .unwrap_or_else(|e| fail(e.to_string()));
             // As the browser's `buildTokenRequest` sets them.
             let token = notarize(
                 request(
@@ -489,12 +455,13 @@ async fn run(args: &Args) -> Result<(PathBuf, serde_json::Value), String> {
                     body.as_bytes(),
                 ),
                 |sent, recv| {
-                    Ok((Layout::token_request(sent), Layout::token_response(recv)?))
+                    Ok((Layout::token_request(sent)?, Layout::token_response(recv)?))
                 },
                 &sign,
             )
-            .await?;
-            let bearer = bearer_of(&token)?;
+            .await
+            .unwrap_or_else(|e| fail(e));
+            let bearer = bearer_of(&token.held.recv);
             eprintln!("token received; running the identity session");
             let identity = notarize(
                 request(
@@ -516,15 +483,13 @@ async fn run(args: &Args) -> Result<(PathBuf, serde_json::Value), String> {
                 },
                 &sign,
             )
-            .await?;
+            .await
+            .unwrap_or_else(|e| fail(e));
             (
                 profile,
-                (
-                    "https://api.x.com/2/oauth2/token",
-                    "https://api.x.com/2/users/me",
-                ),
-                token,
-                identity,
+                session_json("https://api.x.com/2/oauth2/token", &token),
+                session_json("https://api.x.com/2/users/me", &identity),
+                (token.held, identity.held),
             )
         }
         _ => {
@@ -543,7 +508,7 @@ async fn run(args: &Args) -> Result<(PathBuf, serde_json::Value), String> {
                     ("client_secret", secret),
                 ],
             )
-            .map_err(|e| e.to_string())?;
+            .unwrap_or_else(|e| fail(e.to_string()));
             // The body is the profile's `token_fields` in order; hyper appends
             // the length.
             let token = notarize(
@@ -559,12 +524,13 @@ async fn run(args: &Args) -> Result<(PathBuf, serde_json::Value), String> {
                     body.as_bytes(),
                 ),
                 |sent, recv| {
-                    Ok((Layout::token_request(sent), Layout::token_response(recv)?))
+                    Ok((Layout::token_request(sent)?, Layout::token_response(recv)?))
                 },
                 &sign,
             )
-            .await?;
-            let bearer = bearer_of(&token)?;
+            .await
+            .unwrap_or_else(|e| fail(e));
+            let bearer = bearer_of(&token.held.recv);
             eprintln!("token received; running the identity session");
             // As the browser's `identityRequest` sets them.
             let identity = notarize(
@@ -589,15 +555,13 @@ async fn run(args: &Args) -> Result<(PathBuf, serde_json::Value), String> {
                 },
                 &sign,
             )
-            .await?;
+            .await
+            .unwrap_or_else(|e| fail(e));
             (
                 profile,
-                (
-                    "https://github.com/login/oauth/access_token",
-                    "https://api.github.com/user",
-                ),
-                token,
-                identity,
+                session_json("https://github.com/login/oauth/access_token", &token),
+                session_json("https://api.github.com/user", &identity),
+                (token.held, identity.held),
             )
         }
     };
@@ -605,39 +569,47 @@ async fn run(args: &Args) -> Result<(PathBuf, serde_json::Value), String> {
     let mut file = submission_json(&args.platform, &notary);
     file["source"] = json!("captured: a real MPC-TLS session against the platform, the verifier in-process, by libid-rs examples/capture_ceremony.rs");
     file["captured_at"] = json!(now());
-    file["token"] = session_json(endpoints.0, &token);
-    file["identity"] = session_json(endpoints.1, &identity);
+    file["token"] = token;
+    file["identity"] = identity;
     let path = args
         .out
         .join(format!("{}-ceremony-real.json", args.platform));
     std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap() + "\n")
-        .map_err(|e| format!("writing {}: {e}", path.display()))?;
+        .unwrap_or_else(|e| fail(format!("writing {}: {e}", path.display())));
     println!("wrote {}", path.display());
 
     // Built after the record is on disk, so a witness that cannot be built
-    // costs the witness and not the capture.
-    let witness =
-        identity_link_witness(&profile, &token.held, &identity.held).map_err(|e| {
-            format!(
-                "identity-link witness: {e}. The public record {} is kept",
-                path.display()
-            )
-        })?;
-    Ok((path, witness))
+    // or written costs the witness and not the capture.
+    let kept = |e: String| -> ! {
+        fail(format!("{e}. The public record {} is kept", path.display()))
+    };
+    let witness = identity_link_witness(&profile, &held.0, &held.1)
+        .unwrap_or_else(|e| kept(format!("identity-link witness: {e}")));
+    let witness_path = args
+        .witness_out
+        .clone()
+        .unwrap_or_else(|| default_witness_path(&args.platform));
+    let json = serde_json::to_string_pretty(&witness).unwrap() + "\n";
+    secret_file::write_new(&witness_path, json.as_bytes())
+        .unwrap_or_else(|e| kept(format!("the witness: {e}")));
+    println!(
+        "wrote {}, the identity-link witness: SECRET, see this example's module doc before \
+         using it.\n{}",
+        witness_path.display(),
+        REVOKE.get().expect("set before the token session")
+    );
 }
 
 /// The bearer the token response carries, which the identity session sends:
-/// the bytes the record commits. An error never prints the response, which
+/// the bytes the record commits. A failure never prints the response, which
 /// holds the bearer.
-fn bearer_of(token: &Session) -> Result<String, String> {
-    let recv = &token.held.recv;
-    let bearer = TokenMembers::in_response(recv)
-        .map_err(|e| format!("the token response's bearer: {e}"))?
-        .bearer
+fn bearer_of(recv: &[u8]) -> String {
+    let bearer = token_bearer(recv)
+        .unwrap_or_else(|e| fail(format!("the token response's bearer: {e}")))
         .value;
-    std::str::from_utf8(&recv[bearer])
-        .ok()
-        .filter(|bearer| bearer.is_ascii())
-        .map(str::to_owned)
-        .ok_or_else(|| "the token response's `access_token` is not ASCII".into())
+    ascii(&recv[bearer])
+        .unwrap_or_else(|| {
+            fail("the token response's `access_token` is not ASCII".into())
+        })
+        .to_owned()
 }

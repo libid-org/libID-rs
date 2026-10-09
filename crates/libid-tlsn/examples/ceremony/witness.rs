@@ -1,19 +1,14 @@
 //! The identity-link circuit's witness for one ceremony, as JSON.
 //!
 //! Included by `#[path]` from `ceremony_fixtures`, `capture_ceremony` and
-//! `tests/ceremony_end_to_end.rs`; not an example of its own.
+//! `tests/ceremony_end_to_end.rs`, each beside `common`; not an example of its
+//! own.
 //!
 //! The circuit opens four committed ranges: the bearer in the token response,
 //! the bearer in the identity request, and the id and the handle in the
 //! identity response. Each is located by the scan its layout was built from,
 //! paired with its opening, and checked: `SHA256(value || blinder)` must equal
 //! the commitment the notary signed over that range.
-//!
-//! Everything in the witness except the commitments is secret: the bearer is
-//! a live credential until the token is revoked, and the id and handle
-//! blinders link the record's commitments to the account for good.
-
-#![allow(dead_code)]
 
 use std::ops::Range;
 
@@ -24,10 +19,10 @@ use libid_tlsn::{
 use libid_transcript::{
     attestation::AttestedData,
     ceremony::{
-        BearerHeader,
+        identity_bearer,
+        token_bearer,
         IdentityMembers,
         Profile,
-        TokenMembers,
     },
 };
 use serde_json::{
@@ -35,6 +30,8 @@ use serde_json::{
     Value,
 };
 use sha2::Digest as _;
+
+use super::common::hex0x;
 
 /// One notarized session as its prover holds it: both directions in full, the
 /// opening of every commitment, and the record the notary signed.
@@ -58,13 +55,11 @@ pub fn identity_link_witness(
     let session = profile.identity.ok_or_else(|| {
         format!("the `{}` profile has no identity session", profile.platform)
     })?;
-    let token_bearer = TokenMembers::in_response(&token.recv)
+    let token_bearer = token_bearer(&token.recv)
         .map_err(|e| format!("token bearer: {e}"))?
-        .bearer
         .value;
-    let identity_bearer = BearerHeader::in_request(&identity.sent)
-        .map_err(|e| format!("identity bearer: {e}"))?
-        .value;
+    let identity_bearer =
+        identity_bearer(&identity.sent).map_err(|e| format!("identity bearer: {e}"))?;
     let members = IdentityMembers::in_response(&identity.recv, &session)
         .map_err(|e| format!("id and handle: {e}"))?;
 
@@ -124,13 +119,16 @@ fn open(
             "{what}: the signed commitment is not SHA256(value || blinder)"
         ));
     }
-    let value = std::str::from_utf8(value)
-        .ok()
-        .filter(|v| v.is_ascii())
-        .ok_or_else(|| format!("{what}: not ASCII"))?;
+    let value = ascii(value).ok_or_else(|| format!("{what}: not ASCII"))?;
     Ok(json!({
         "value": value,
-        "blinder": format!("0x{}", hex::encode(&opening.blinder)),
-        "commitment": format!("0x{}", hex::encode(commitment)),
+        "blinder": hex0x(&opening.blinder),
+        "commitment": hex0x(&commitment),
     }))
+}
+
+/// A committed value as text: the witness and the identity request carry it
+/// as the wire did, and every value the circuit opens is ASCII.
+pub fn ascii(value: &[u8]) -> Option<&str> {
+    std::str::from_utf8(value).ok().filter(|v| v.is_ascii())
 }
