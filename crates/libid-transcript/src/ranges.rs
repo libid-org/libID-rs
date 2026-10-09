@@ -115,7 +115,7 @@ fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-/// A `"field":"value"` member, and the value inside it.
+/// A `"field":"value"` or `"field":123` member, and the value inside it.
 ///
 /// Two ranges rather than one because a caller that reveals the delimiters and
 /// commits the value needs both boundaries, and deriving the inner one from the
@@ -123,9 +123,11 @@ fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>> {
 /// the field name and one place to forget.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JsonMember {
-    /// The whole member, both delimiters included.
+    /// From the key's opening quote through the value's closing quote, or for
+    /// a bare integer through the whitespace and the `,` or `}` after it.
     pub member: Range<usize>,
-    /// The value alone, between the quotes. Empty when the value is `""`.
+    /// The value without quotes: the bytes between them, empty for `""`, or
+    /// the digits.
     pub value: Range<usize>,
 }
 
