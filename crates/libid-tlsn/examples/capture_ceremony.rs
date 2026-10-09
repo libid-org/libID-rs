@@ -31,42 +31,21 @@
 //!     --platform x --client-id ID --out <dir>
 //! ```
 //!
-//! It then writes the identity-link circuit's witness -- the bearer, the id
-//! and the handle, each with its blinder -- to a NEW owner-only file in the
-//! system temporary directory, never beside the record:
+//! The public record is written first. Then the identity-link circuit's
+//! witness -- the bearer, the id and the handle, each with its blinder -- goes
+//! to a NEW owner-only file (mode 0600, unix only), by default in the system
+//! temporary directory:
 //! `$TMPDIR/libid-<platform>-identity-link-witness-<unix time>.secret.json`, or
-//! `--witness-out <path>`, whose name must end in `.secret.json`, which must
-//! not exist yet, and which, inside a git work tree, that tree must ignore
-//! (this repository ignores `*.secret.json`; libID-contracts and
-//! libID-circuits do not). It prints the path and never the contents. Unix
-//! only: elsewhere the destination is refused, since the file's mode is what
-//! keeps it private.
+//! `--witness-out <path>`, which must not exist yet. It prints the path and
+//! never the contents.
 //!
-//! That file is created, and the redirect listener bound, before the consent
-//! URL is printed, so a destination that is refused (an existing path, a
-//! symlink, a directory, a missing parent, a name without the suffix, a path
-//! git could commit) or a port already taken costs nothing. If the capture
-//! fails after that, the file is removed, and the error says so.
-//!
-//! Next, outside every repository, build the circuit's input from it with
-//! `libID-circuits/scripts/identity-link-witness.py <witness> --out
-//! <dir outside any repo>/<name>.toml` and run the nargo commands that script
-//! prints. Then delete the witness and the `.toml`, and revoke the token.
-//!
-//! That file is secret, and not only while the token lives. The bearer is a
-//! live credential until you revoke the token. The id and handle blinders are
-//! secret for good: anyone holding them can link the record's commitments, and
-//! any on-chain commitment to the same values, to the plaintext account.
-//! Revoking the token does not undo that. Prove from the witness, then delete
-//! it and revoke the token; never copy it into a fixtures directory.
-//!
-//! The public record is written first. If the witness cannot be built, the
-//! error names which value failed and the record is kept.
-//!
-//! From the moment the token request is sent, every way this process ends
-//! that it can observe says to revoke the token it may have issued: success,
-//! an error, a panic (a hook installed then), Ctrl-C, and on unix SIGTERM and
-//! SIGHUP. SIGKILL and a lost machine cannot be observed, and say nothing.
+//! That file is secret. The bearer is a live credential until you revoke the
+//! token. The id and handle blinders are secret for good: anyone holding them
+//! can link the record's commitments to the plaintext account, and revoking
+//! the token does not undo that. Build the circuit's input from it outside
+//! every repository with `libID-circuits/scripts/identity-link-witness.py`,
+//! then delete it and revoke the token. Never copy it into a fixtures
+//! directory.
 //!
 //! `--redirect-uri` and `--listen` override the pair for an app registered
 //! elsewhere; they move together, since the code arrives on the address the
@@ -79,14 +58,11 @@
 mod common;
 #[path = "ceremony/secret_file.rs"]
 mod secret_file;
+#[path = "ceremony/witness.rs"]
+mod witness;
 
 use std::{
-    future::Future,
     path::PathBuf,
-    sync::atomic::{
-        AtomicBool,
-        Ordering,
-    },
     time::{
         SystemTime,
         UNIX_EPOCH,
@@ -115,16 +91,9 @@ use libid_transcript::{
         form_encode,
         profiles,
         token_body,
-        HeldSession,
-        IdentityLinkWitness,
         Layout,
         TokenMembers,
     },
-    extract_response_body,
-};
-use secret_file::{
-    SecretFile,
-    SECRET_SUFFIX,
 };
 use serde_json::json;
 use tlsn::connection::ServerName;
@@ -134,6 +103,10 @@ use tokio::{
         AsyncWriteExt,
     },
     net::TcpListener,
+};
+use witness::{
+    identity_link_witness,
+    Held,
 };
 
 /// The redirect URI every platform's app registers, and the address the code
@@ -291,9 +264,9 @@ struct Session {
     created_at: u64,
     authority: String,
     /// Both directions in full, the openings and the record, as the prover
-    /// holds them. Private: the witness is built from them and they are never
-    /// written to the fixture.
-    held: HeldSession,
+    /// holds them. The witness is built from them; the public record never
+    /// carries them.
+    held: Held,
 }
 
 /// One notarized session: the prover against the real platform, the
@@ -310,10 +283,12 @@ async fn notarize(
 ) -> Result<Session, String> {
     let (to_verifier, from_prover) = tokio::io::duplex(1 << 16);
     let verifier = tokio::spawn(libid_tlsn::verifier(from_prover));
+    let mut transcript = None;
     let prover = libid_tlsn::prover_generic(
         to_verifier,
         request,
         |sent, recv| {
+            transcript = Some((sent.to_vec(), recv.to_vec()));
             layouts(sent, recv).map_err(|e| libid_tlsn::Error::MpcTlsFailed {
                 detail: format!("layout: {e}"),
             })
@@ -335,6 +310,7 @@ async fn notarize(
         .await
         .map_err(|e| format!("verifier task: {e}"))?
         .map_err(|e| format!("the verifier's session: {e}"))?;
+    let (sent, recv) = transcript.expect("the layouts ran on the transcript");
     let ServerName::Dns(ref name) = observed.server_name;
     let authority = name.as_str().to_owned();
     let created_at = now();
@@ -362,7 +338,12 @@ async fn notarize(
         signature,
         created_at,
         authority,
-        held: prover.held_session(data),
+        held: Held {
+            sent,
+            recv,
+            openings: prover.commitment_openings,
+            record: data,
+        },
     })
 }
 
@@ -372,10 +353,10 @@ fn fail(message: String) -> ! {
 }
 
 /// The default witness destination: a new name in the system temporary
-/// directory.
+/// directory, outside any repository.
 fn default_witness_path(platform: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "libid-{platform}-identity-link-witness-{}{SECRET_SUFFIX}",
+        "libid-{platform}-identity-link-witness-{}.secret.json",
         now()
     ))
 }
@@ -405,138 +386,43 @@ fn request(
         .expect("valid request")
 }
 
-/// Set as the token request is sent: from then on the platform may have
-/// issued a live bearer, and every exit says to revoke it.
-static TOKEN_REQUESTED: AtomicBool = AtomicBool::new(false);
-/// Set once the revoke hint is printed, so a panic that also surfaces as an
-/// error prints it once.
-static HINT_PRINTED: AtomicBool = AtomicBool::new(false);
-
-fn print_revoke_hint(platform: &str) {
-    if TOKEN_REQUESTED.load(Ordering::SeqCst)
-        && !HINT_PRINTED.swap(true, Ordering::SeqCst)
-    {
-        eprintln!(
-            "The token session may have issued a live bearer for your account: revoke the app's \
-             access in {platform}'s authorized-apps settings."
-        );
-    }
-}
-
-/// Record that the token request is about to be sent, and from now on print
-/// the revoke hint on a panic too.
-fn token_requested(platform: &str) {
-    TOKEN_REQUESTED.store(true, Ordering::SeqCst);
-    let platform = platform.to_owned();
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        previous(info);
-        print_revoke_hint(&platform);
-    }));
-}
-
-/// What resolves when the capture is asked to stop: Ctrl-C, SIGTERM or
-/// SIGHUP. Registered before the capture starts, so a signal that cannot be
-/// listened for stops nothing half-way.
-#[cfg(unix)]
-fn stop_requested() -> Result<impl Future<Output = &'static str>, String> {
-    use tokio::signal::unix::{
-        signal,
-        SignalKind,
-    };
-    let listen = |kind: SignalKind, name: &str| {
-        signal(kind).map_err(|e| format!("listening for {name}: {e}"))
-    };
-    let mut interrupt = listen(SignalKind::interrupt(), "SIGINT")?;
-    let mut terminate = listen(SignalKind::terminate(), "SIGTERM")?;
-    let mut hangup = listen(SignalKind::hangup(), "SIGHUP")?;
-    Ok(async move {
-        tokio::select! {
-            _ = interrupt.recv() => "interrupted (SIGINT)",
-            _ = terminate.recv() => "terminated (SIGTERM)",
-            _ = hangup.recv() => "hung up (SIGHUP)",
-        }
-    })
-}
-
-/// What resolves when the capture is asked to stop: Ctrl-C.
-#[cfg(not(unix))]
-fn stop_requested() -> Result<impl Future<Output = &'static str>, String> {
-    Ok(async {
-        match tokio::signal::ctrl_c().await {
-            Ok(()) => "interrupted (Ctrl-C)",
-            Err(_) => std::future::pending().await,
-        }
-    })
-}
-
 #[tokio::main]
 async fn main() {
     let args = args();
-    // Before the consent and both sessions, so a refused destination costs
-    // nothing.
-    let witness_path = args
+    let (record, witness) = run(&args).await.unwrap_or_else(|e| {
+        fail(format!(
+            "{e}\nIf the token session ran, revoke the app's access in {}'s authorized-apps \
+             settings.",
+            args.platform
+        ))
+    });
+    let path = args
         .witness_out
         .clone()
         .unwrap_or_else(|| default_witness_path(&args.platform));
-    let witness_file = SecretFile::create(witness_path).unwrap_or_else(|e| {
+    let json = serde_json::to_string_pretty(&witness).expect("witness JSON") + "\n";
+    if let Err(e) = secret_file::write_new(&path, json.as_bytes()) {
         fail(format!(
-            "the witness destination: {e}. Pass `--witness-out <dir>/<name>{SECRET_SUFFIX}` \
-             naming a new file in an existing directory outside any git work tree"
-        ))
-    });
-    let stop = match stop_requested() {
-        Ok(stop) => stop,
-        Err(e) => fail(format!("{e}. {}", witness_file.discard())),
-    };
-
-    // Raced against the stop signals, so a stopped capture still removes the
-    // unwritten witness file below.
-    let ran = tokio::select! {
-        ran = run(&args) => ran,
-        stopped = stop => Err(stopped.to_owned()),
-    };
-    let outcome = match ran {
-        Ok((record, witness)) => {
-            let json =
-                serde_json::to_string_pretty(&witness).expect("witness JSON") + "\n";
-            witness_file.write(json.as_bytes()).map_err(|e| {
-                format!(
-                    "the witness: {e}. The public record {} is kept",
-                    record.display()
-                )
-            })
-        }
-        Err(e) => Err(format!("{e}. {}", witness_file.discard())),
-    };
-    match outcome {
-        Ok(witness_path) => {
-            let witness = witness_path.display();
-            println!(
-                "wrote {witness} (owner-only, secret: the live bearer until you revoke the \
-                 token, and blinders that link the commitments to the account for good).\n\
-                 Next, build the circuit's input outside every repository:\n  \
-                 libID-circuits/scripts/identity-link-witness.py {witness} \
-                 --out <dir outside any repo>/<name>.toml\n\
-                 and run the nargo commands it prints. Then delete {witness} and the .toml, and \
-                 revoke the app's access in {}'s authorized-apps settings.",
-                args.platform
-            );
-            HINT_PRINTED.store(true, Ordering::SeqCst);
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            print_revoke_hint(&args.platform);
-            std::process::exit(1)
-        }
+            "the witness: {e}. The public record {} is kept. Revoke the app's access in {}'s \
+             authorized-apps settings",
+            record.display(),
+            args.platform
+        ));
     }
+    println!(
+        "wrote {} (owner-only, secret: the live bearer until you revoke the token, and \
+         blinders that link the commitments to the account for good).\n\
+         Build the circuit's input outside every repository with \
+         libID-circuits/scripts/identity-link-witness.py, then delete the witness and revoke \
+         the app's access in {}'s authorized-apps settings.",
+        path.display(),
+        args.platform
+    );
 }
 
-/// The consent, both sessions and the public record; the witness to write.
-///
-/// Calls [`token_requested`] as the token session starts, so every exit from
-/// then on tells the user to revoke the token.
-async fn run(args: &Args) -> Result<(PathBuf, IdentityLinkWitness), String> {
+/// The consent, both sessions and the public record; the record's path and
+/// the witness to write.
+async fn run(args: &Args) -> Result<(PathBuf, serde_json::Value), String> {
     std::fs::create_dir_all(&args.out)
         .map_err(|e| format!("the output directory {}: {e}", args.out.display()))?;
     let key = hex_to_signing_key(NOTARY_KEY).expect("notary key");
@@ -588,7 +474,6 @@ async fn run(args: &Args) -> Result<(PathBuf, IdentityLinkWitness), String> {
                 ],
             )
             .map_err(|e| e.to_string())?;
-            token_requested(&args.platform);
             // As the browser's `buildTokenRequest` sets them.
             let token = notarize(
                 request(
@@ -659,7 +544,6 @@ async fn run(args: &Args) -> Result<(PathBuf, IdentityLinkWitness), String> {
                 ],
             )
             .map_err(|e| e.to_string())?;
-            token_requested(&args.platform);
             // The body is the profile's `token_fields` in order; hyper appends
             // the length.
             let token = notarize(
@@ -733,48 +617,27 @@ async fn run(args: &Args) -> Result<(PathBuf, IdentityLinkWitness), String> {
     // Built after the record is on disk, so a witness that cannot be built
     // costs the witness and not the capture.
     let witness =
-        IdentityLinkWitness::build(&profile, token.held.proved(), identity.held.proved())
-            .map_err(|e| {
-                format!(
-                    "identity-link witness: {e}. The public record {} is kept",
-                    path.display()
-                )
-            })?;
+        identity_link_witness(&profile, &token.held, &identity.held).map_err(|e| {
+            format!(
+                "identity-link witness: {e}. The public record {} is kept",
+                path.display()
+            )
+        })?;
     Ok((path, witness))
 }
 
-/// The bearer out of the token response, which the identity session sends.
-///
-/// The public record commits it and never carries it; the witness carries it.
-/// The bearer JSON decodes must be the bytes the record commits, or the
-/// identity session would send a bearer the identity-link circuit cannot
-/// match to the token response's; that is refused here, before the identity
-/// session. An error names what is wrong and never prints the response, which
+/// The bearer the token response carries, which the identity session sends:
+/// the bytes the record commits. An error never prints the response, which
 /// holds the bearer.
 fn bearer_of(token: &Session) -> Result<String, String> {
     let recv = &token.held.recv;
-    let body = extract_response_body(recv)
-        .map_err(|_| "the token response has no body that decodes".to_owned())?;
-    let json: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|_| "the token response is not JSON".to_owned())?;
-    let bearer = json[TokenMembers::FIELD]
-        .as_str()
-        .ok_or("the token response has no string `access_token`")?;
-    if !bearer.is_ascii() {
-        return Err("the token response's `access_token` is not ASCII".into());
-    }
-    let committed = TokenMembers::in_response(recv)
-        .map_err(|e| format!("the token response's committed bearer: {e}"))?
+    let bearer = TokenMembers::in_response(recv)
+        .map_err(|e| format!("the token response's bearer: {e}"))?
         .bearer
         .value;
-    if recv[committed] != *bearer.as_bytes() {
-        return Err(
-            "the bearer the token response decodes to is not the bytes its record commits: \
-             either the response escapes a character in it, or it carries two `access_token` \
-             members (JSON keeps the last, the record commits the first). The identity-link \
-             circuit could not match the identity session's bearer to it"
-                .into(),
-        );
-    }
-    Ok(bearer.to_owned())
+    std::str::from_utf8(&recv[bearer])
+        .ok()
+        .filter(|bearer| bearer.is_ascii())
+        .map(str::to_owned)
+        .ok_or_else(|| "the token response's `access_token` is not ASCII".into())
 }

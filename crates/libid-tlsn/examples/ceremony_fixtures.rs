@@ -49,10 +49,7 @@ use libid_transcript::{
     ceremony::{
         profiles,
         token_body,
-        HeldSession,
-        IdentityLinkWitness,
         Layout,
-        Opening,
     },
 };
 use serde_json::json;
@@ -79,7 +76,13 @@ use tokio::io::{
 
 #[path = "ceremony/common.rs"]
 mod common;
+#[path = "ceremony/witness.rs"]
+mod witness;
 use common::*;
+use witness::{
+    identity_link_witness,
+    Held,
+};
 
 /// The clock the contract suites warp to.
 const T0: u64 = 1_770_000_000;
@@ -186,12 +189,12 @@ fn blinder(session: &str, index: usize) -> [u8; 16] {
 }
 
 /// The openings as the fixture lists them.
-fn openings_json(openings: &[Opening]) -> Vec<serde_json::Value> {
+fn openings_json(openings: &[CommitmentOpening]) -> Vec<serde_json::Value> {
     openings
         .iter()
         .map(|opening| {
             json!({
-                "direction": opening.direction.as_str(),
+                "direction": opening.direction.to_string(),
                 "ranges": opening.ranges.iter().map(|r| json!([r.start, r.end])).collect::<Vec<_>>(),
                 "blinder": hex0x(&opening.blinder),
             })
@@ -203,16 +206,15 @@ fn openings_json(openings: &[Opening]) -> Vec<serde_json::Value> {
 /// for the circuit's tests. Its commitments are checked against these records,
 /// whose hashes this generator computed with tlsn's hasher: a check of the two
 /// sides agreeing on `SHA256(value || blinder)`, not of tlsn's MPC protocol.
-/// `tests/ceremony_end_to_end.rs` checks the builder against tlsn's own
+/// `tests/ceremony_end_to_end.rs` checks the helper against tlsn's own
 /// commitment hash.
 fn witness_json(
     profile: &libid_transcript::ceremony::Profile,
-    token: &HeldSession,
-    identity: &HeldSession,
+    token: &Held,
+    identity: &Held,
 ) -> serde_json::Value {
-    let witness = IdentityLinkWitness::build(profile, token.proved(), identity.proved())
-        .unwrap_or_else(|e| panic!("identity-link witness: {e}"));
-    serde_json::to_value(&witness).expect("witness JSON")
+    identity_link_witness(profile, token, identity)
+        .unwrap_or_else(|e| panic!("identity-link witness: {e}"))
 }
 
 /// `prover_generic`'s reveal and commit configuration, then the verifier's
@@ -224,7 +226,7 @@ fn build(
     sl: &Layout,
     rl: &Layout,
     authority: &str,
-) -> HeldSession {
+) -> Held {
     let transcript = Transcript::new(sent, recv);
 
     let mut commits = TranscriptCommitConfig::builder(&transcript);
@@ -283,11 +285,11 @@ fn build(
             let blinder = blinder(session, index);
             let value = hasher.hash_prefixed(&plaintext, &blinder);
             // What `prover_generic` hands back for this commitment.
-            openings.push(Opening::from(&CommitmentOpening {
+            openings.push(CommitmentOpening {
                 direction: *direction,
                 ranges: ranges.clone(),
                 blinder: blinder.to_vec(),
-            }));
+            });
             TranscriptCommitment::Hash(PlaintextHash {
                 direction: direction.to_owned(),
                 idx: idx.clone(),
@@ -306,7 +308,7 @@ fn build(
         created_at: T0,
     })
     .expect("record");
-    HeldSession {
+    Held {
         sent: sent.to_vec(),
         recv: recv.to_vec(),
         openings,
@@ -318,7 +320,7 @@ fn session_json(
     endpoint: &str,
     sent: &[u8],
     recv: &[u8],
-    held: &HeldSession,
+    held: &Held,
     sign: &dyn Fn(&[u8; 32]) -> Vec<u8>,
 ) -> serde_json::Value {
     let attested = held.record.encode().expect("encode");
