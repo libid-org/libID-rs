@@ -11,12 +11,10 @@
 //! You supply the app and the consent: register the redirect URI below on the
 //! app, run this, open the URL it prints, log in, consent. It receives the
 //! code, runs the token session and then the identity session, and writes
-//! `<platform>-ceremony-real.json` into `--out`, beside the generated fixture.
-//!
-//! That file is public. It carries no bearer, id or handle: the records commit
-//! them. The token request is revealed whole, client credential included, so
-//! the file is a public record of a public credential; the code in it is
-//! spent.
+//! `<platform>-ceremony-real.json` beside the generated fixture. The bearer is
+//! never written: the record commits it. The request is revealed whole,
+//! credential included, so the file is a public record of a public credential;
+//! the code in it is spent.
 //!
 //! ONE REDIRECT URI SERVES EVERY PLATFORM: `http://127.0.0.1:8722/auth/callback`,
 //! the default here and the path the bridge serves. A path naming its platform
@@ -31,22 +29,6 @@
 //!     --platform x --client-id ID --out <dir>
 //! ```
 //!
-//! The public record is written first. Then the identity-link circuit's
-//! witness -- the bearer, the id and the handle, each with its blinder -- goes
-//! to a NEW owner-only file (mode 0600, unix only), by default in the system
-//! temporary directory:
-//! `$TMPDIR/libid-<platform>-identity-link-witness-<unix time>.secret.json`, or
-//! `--witness-out <path>`, which must not exist yet. It prints the path and
-//! never the contents.
-//!
-//! That file is secret. The bearer is a live credential until you revoke the
-//! token. The id and handle blinders are secret for good: anyone holding them
-//! can link the record's commitments to the plaintext account, and revoking
-//! the token does not undo that. Build the circuit's input from it outside
-//! every repository with `libID-circuits/scripts/identity-link-witness.py`,
-//! then delete it and revoke the token. Never copy it into a fixtures
-//! directory.
-//!
 //! `--redirect-uri` and `--listen` override the pair for an app registered
 //! elsewhere; they move together, since the code arrives on the address the
 //! platform redirects to.
@@ -56,14 +38,9 @@
 
 #[path = "ceremony/common.rs"]
 mod common;
-#[path = "ceremony/secret_file.rs"]
-mod secret_file;
-#[path = "ceremony/witness.rs"]
-mod witness;
 
 use std::{
     path::PathBuf,
-    sync::OnceLock,
     time::{
         SystemTime,
         UNIX_EPOCH,
@@ -91,7 +68,6 @@ use libid_transcript::{
     ceremony::{
         form_encode,
         profiles,
-        token_bearer,
         token_body,
         Layout,
     },
@@ -104,11 +80,6 @@ use tokio::{
         AsyncWriteExt,
     },
     net::TcpListener,
-};
-use witness::{
-    ascii,
-    identity_link_witness,
-    Held,
 };
 
 /// The redirect URI every platform's app registers, and the address the code
@@ -124,7 +95,6 @@ struct Args {
     redirect_uri: String,
     listen: String,
     out: PathBuf,
-    witness_out: Option<PathBuf>,
 }
 
 fn args() -> Args {
@@ -134,7 +104,6 @@ fn args() -> Args {
     let mut redirect_uri = DEFAULT_REDIRECT_URI.to_owned();
     let mut listen = DEFAULT_LISTEN.to_owned();
     let mut out = None;
-    let mut witness_out = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().unwrap_or_else(|| panic!("{flag} needs a value"));
@@ -145,24 +114,16 @@ fn args() -> Args {
             "--redirect-uri" => redirect_uri = value(),
             "--listen" => listen = value(),
             "--out" => out = Some(PathBuf::from(value())),
-            "--witness-out" => witness_out = Some(PathBuf::from(value())),
             other => panic!("unknown flag {other}"),
         }
     }
-    let platform = platform.expect("--platform x|github");
-    match platform.as_str() {
-        "x" => {}
-        "github" => assert!(client_secret.is_some(), "--client-secret for github"),
-        other => panic!("unknown platform {other}"),
-    }
     Args {
-        platform,
+        platform: platform.expect("--platform x|github"),
         client_id: client_id.expect("--client-id"),
         client_secret,
         redirect_uri,
         listen,
         out: out.expect("--out <dir>"),
-        witness_out,
     }
 }
 
@@ -205,9 +166,11 @@ fn now() -> u64 {
         .as_secs()
 }
 
-/// Wait for the browser's redirect on `listener` and return the code it
-/// carries.
-async fn receive_code(listener: TcpListener, expected_state: &str) -> String {
+/// Wait for the browser's redirect on `listen` and return the code it carries.
+async fn receive_code(listen: &str, expected_state: &str) -> String {
+    let listener = TcpListener::bind(listen)
+        .await
+        .expect("bind the redirect listener");
     loop {
         let (mut socket, _) = listener.accept().await.expect("accept");
         let mut buf = vec![0u8; 8192];
@@ -252,13 +215,11 @@ async fn receive_code(listener: TcpListener, expected_state: &str) -> String {
 }
 
 struct Session {
+    record: Vec<u8>,
     signature: Vec<u8>,
     created_at: u64,
+    response_body: Vec<u8>,
     authority: String,
-    /// Both directions in full, the openings and the record, as the prover
-    /// holds them. The witness is built from them; the public record carries
-    /// only the record.
-    held: Held,
 }
 
 /// One notarized session: the prover against the real platform, the
@@ -275,12 +236,10 @@ async fn notarize(
 ) -> Result<Session, String> {
     let (to_verifier, from_prover) = tokio::io::duplex(1 << 16);
     let verifier = tokio::spawn(libid_tlsn::verifier(from_prover));
-    let mut transcript = None;
     let prover = libid_tlsn::prover_generic(
         to_verifier,
         request,
         |sent, recv| {
-            transcript = Some((sent.to_vec(), recv.to_vec()));
             layouts(sent, recv).map_err(|e| libid_tlsn::Error::MpcTlsFailed {
                 detail: format!("layout: {e}"),
             })
@@ -302,7 +261,6 @@ async fn notarize(
         .await
         .map_err(|e| format!("verifier task: {e}"))?
         .map_err(|e| format!("the verifier's session: {e}"))?;
-    let (sent, recv) = transcript.expect("the layouts ran on the transcript");
     let ServerName::Dns(ref name) = observed.server_name;
     let authority = name.as_str().to_owned();
     let created_at = now();
@@ -324,37 +282,17 @@ async fn notarize(
         data.received.commitments.len()
     );
     Ok(Session {
+        record,
         signature,
         created_at,
+        response_body: prover.response_body,
         authority,
-        held: Held {
-            sent,
-            recv,
-            openings: prover.commitment_openings,
-            record: data,
-        },
     })
 }
 
-/// Set when the token session starts: from then on a token may have been
-/// issued, and every exit says to revoke it.
-static REVOKE: OnceLock<String> = OnceLock::new();
-
 fn fail(message: String) -> ! {
     eprintln!("error: {message}");
-    if let Some(revoke) = REVOKE.get() {
-        eprintln!("{revoke}");
-    }
     std::process::exit(1)
-}
-
-/// The default witness destination: a new name in the system temporary
-/// directory, outside any repository.
-fn default_witness_path(platform: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "libid-{platform}-identity-link-witness-{}.secret.json",
-        now()
-    ))
 }
 
 fn session_json(endpoint: &str, session: &Session) -> serde_json::Value {
@@ -362,7 +300,7 @@ fn session_json(endpoint: &str, session: &Session) -> serde_json::Value {
         "endpoint": endpoint,
         "authority": session.authority,
         "created_at": session.created_at,
-        "attested_data": hex0x(&session.held.record.encode().expect("encode")),
+        "attested_data": hex0x(&session.record),
         "notary_signature": hex0x(&session.signature),
     })
 }
@@ -400,7 +338,7 @@ async fn main() {
             "tweet.read users.read",
         ),
         "github" => ("https://github.com/login/oauth/authorize?", "read:user"),
-        other => unreachable!("args() refuses platform {other}"),
+        other => panic!("unknown platform {other}"),
     };
     let separator = if authorize.ends_with('?') { "" } else { "&" };
     let url = format!(
@@ -409,25 +347,11 @@ async fn main() {
         form_encode(&args.redirect_uri),
         form_encode(scope),
     );
-    // Bound before the URL is printed: a consent given while nothing listens
-    // is a code lost.
-    let listener = TcpListener::bind(&args.listen).await.unwrap_or_else(|e| {
-        fail(format!(
-            "binding the redirect listener on {}: {e}. Stop whatever holds the port, or pass \
-             `--listen` and the matching `--redirect-uri` registered on the app",
-            args.listen
-        ))
-    });
     eprintln!("\nOpen this URL, log in, and consent:\n\n{url}\n\nWaiting for the redirect on {} ...", args.listen);
-    let code = receive_code(listener, &state).await;
+    let code = receive_code(&args.listen, &state).await;
     eprintln!("code received; running the token session");
-    let revoke = format!(
-        "Revoke the app's access in {}'s authorized-apps settings: the token is live until then.",
-        args.platform
-    );
-    REVOKE.set(revoke).expect("set once");
 
-    let (profile, token, identity, held) = match args.platform.as_str() {
+    let (token, identity) = match args.platform.as_str() {
         "x" => {
             let profile = profiles::X;
             let body = token_body(
@@ -461,7 +385,7 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
-            let bearer = bearer_of(&token.held.recv);
+            let bearer = bearer_of(&token.response_body);
             eprintln!("token received; running the identity session");
             let identity = notarize(
                 request(
@@ -486,10 +410,8 @@ async fn main() {
             .await
             .unwrap_or_else(|e| fail(e));
             (
-                profile,
                 session_json("https://api.x.com/2/oauth2/token", &token),
                 session_json("https://api.x.com/2/users/me", &identity),
-                (token.held, identity.held),
             )
         }
         _ => {
@@ -497,7 +419,7 @@ async fn main() {
             let secret = args
                 .client_secret
                 .as_deref()
-                .expect("args() requires --client-secret for github");
+                .expect("--client-secret for github");
             let body = token_body(
                 &profile.token.unwrap(),
                 &[
@@ -530,7 +452,7 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
-            let bearer = bearer_of(&token.held.recv);
+            let bearer = bearer_of(&token.response_body);
             eprintln!("token received; running the identity session");
             // As the browser's `identityRequest` sets them.
             let identity = notarize(
@@ -558,10 +480,8 @@ async fn main() {
             .await
             .unwrap_or_else(|e| fail(e));
             (
-                profile,
                 session_json("https://github.com/login/oauth/access_token", &token),
                 session_json("https://api.github.com/user", &identity),
-                (token.held, identity.held),
             )
         }
     };
@@ -575,41 +495,17 @@ async fn main() {
         .out
         .join(format!("{}-ceremony-real.json", args.platform));
     std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap() + "\n")
-        .unwrap_or_else(|e| fail(format!("writing {}: {e}", path.display())));
+        .expect("write");
     println!("wrote {}", path.display());
-
-    // Built after the record is on disk, so a witness that cannot be built
-    // or written costs the witness and not the capture.
-    let kept = |e: String| -> ! {
-        fail(format!("{e}. The public record {} is kept", path.display()))
-    };
-    let witness = identity_link_witness(&profile, &held.0, &held.1)
-        .unwrap_or_else(|e| kept(format!("identity-link witness: {e}")));
-    let witness_path = args
-        .witness_out
-        .clone()
-        .unwrap_or_else(|| default_witness_path(&args.platform));
-    let json = serde_json::to_string_pretty(&witness).unwrap() + "\n";
-    secret_file::write_new(&witness_path, json.as_bytes())
-        .unwrap_or_else(|e| kept(format!("the witness: {e}")));
-    println!(
-        "wrote {}, the identity-link witness: SECRET, see this example's module doc before \
-         using it.\n{}",
-        witness_path.display(),
-        REVOKE.get().expect("set before the token session")
-    );
 }
 
-/// The bearer the token response carries, which the identity session sends:
-/// the bytes the record commits. A failure never prints the response, which
-/// holds the bearer.
-fn bearer_of(recv: &[u8]) -> String {
-    let bearer = token_bearer(recv)
-        .unwrap_or_else(|e| fail(format!("the token response's bearer: {e}")))
-        .value;
-    ascii(&recv[bearer])
-        .unwrap_or_else(|| {
-            fail("the token response's `access_token` is not ASCII".into())
-        })
+/// The bearer out of the token response, which the identity session needs
+/// and nothing else sees: it is committed in both records and not written.
+fn bearer_of(body: &[u8]) -> String {
+    let json: serde_json::Value =
+        serde_json::from_slice(body).expect("the token response is JSON");
+    json["access_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no access_token in the token response: {json}"))
         .to_owned()
 }

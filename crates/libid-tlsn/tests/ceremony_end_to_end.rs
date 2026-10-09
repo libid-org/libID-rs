@@ -12,8 +12,8 @@
 //! session is reproduced from the layouts rather than notarized. The
 //! commitments are tlsn's own `PlaintextHash` values, computed by tlsn's
 //! `hash_plaintext` with a tlsn `Blinder` per commitment, and the
-//! identity-link witness the examples emit is built from those openings and
-//! checked against them.
+//! identity-link witness `ceremony_fixtures` emits is built from those
+//! openings and checked against them.
 //!
 //! What this does not check is that a live MPC session computes the same
 //! value. `prover_generic` dials `<host>:443` and trusts the WebPKI roots only,

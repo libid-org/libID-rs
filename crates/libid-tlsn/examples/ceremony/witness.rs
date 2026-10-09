@@ -1,6 +1,6 @@
 //! The identity-link circuit's witness for one ceremony, as JSON.
 //!
-//! Included by `#[path]` from `ceremony_fixtures`, `capture_ceremony` and
+//! Included by `#[path]` from `ceremony_fixtures` and
 //! `tests/ceremony_end_to_end.rs`, each beside `common`; not an example of its
 //! own.
 //!
@@ -129,6 +129,6 @@ fn open(
 
 /// A committed value as text: the witness and the identity request carry it
 /// as the wire did, and every value the circuit opens is ASCII.
-pub fn ascii(value: &[u8]) -> Option<&str> {
+fn ascii(value: &[u8]) -> Option<&str> {
     std::str::from_utf8(value).ok().filter(|v| v.is_ascii())
 }
