@@ -38,9 +38,7 @@ webpki-root-certs.workspace = true
 [dev-dependencies]
 # The driver-task leak regression test builds its own runtime so
 # `Runtime::metrics().num_alive_tasks()` counts only tasks the crate spawned.
-# `signal` lets `capture_ceremony` remove its unwritten witness file, and say
-# to revoke the token, on Ctrl-C, SIGTERM or SIGHUP.
-tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }
 # The attested-data tests build tlsn types directly.
 rangeset = "0.4"
 serde_json.workspace = true
@@ -48,4 +46,4 @@ serde_json.workspace = true
 # does and derives the verifier the way the contracts do.
 libid-crypto.workspace = true
 hex.workspace = true
-sha2.workspace = true
+sha2 = "0.10"

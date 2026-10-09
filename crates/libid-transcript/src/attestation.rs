@@ -25,7 +25,7 @@ use libid_crypto::keccak256;
 
 /// Offsets are zero-based into that direction's complete transcript, `start`
 /// inclusive and `end` exclusive.
-#[derive(Clone, Debug, PartialEq, Eq, bincode::Encode, bincode::Decode)]
+#[derive(Clone, Debug, PartialEq, Eq, bincode::Encode)]
 pub struct RevealedRange {
     pub start: u32,
     /// The range's plaintext. Its length IS the range's length -- there is no
@@ -36,7 +36,7 @@ pub struct RevealedRange {
 
 /// A hidden range, carried as its offsets and a blinded commitment. The
 /// plaintext of a committed range never appears in the attested data.
-#[derive(Clone, Debug, PartialEq, Eq, bincode::Encode, bincode::Decode)]
+#[derive(Clone, Debug, PartialEq, Eq, bincode::Encode)]
 pub struct RangeCommitment {
     pub start: u32,
     pub end: u32,
@@ -44,7 +44,7 @@ pub struct RangeCommitment {
 }
 
 /// One direction of the session.
-#[derive(Clone, Debug, Default, PartialEq, Eq, bincode::Encode, bincode::Decode)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, bincode::Encode)]
 pub struct DirectionBlock {
     pub revealed: Vec<RevealedRange>,
     pub commitments: Vec<RangeCommitment>,
@@ -57,7 +57,7 @@ pub struct DirectionBlock {
 /// Authorization Digest already commits the chain, and binding an attestation
 /// to one verifier would stop a newly registered version checking attestations
 /// made before it existed.
-#[derive(Clone, Debug, PartialEq, Eq, bincode::Encode, bincode::Decode)]
+#[derive(Clone, Debug, PartialEq, Eq, bincode::Encode)]
 pub struct AttestedData {
     /// The TLS server name the notary authenticated, hashed.
     ///
@@ -90,11 +90,6 @@ const WIRE: bincode::config::Configuration<
 > = bincode::config::standard()
     .with_big_endian()
     .with_fixed_int_encoding();
-
-/// The most memory [`AttestedData::decode`] lets one record's length prefixes
-/// claim. A notarized session carries at most 4 KiB sent and 32 KiB received,
-/// so a genuine record is far below it.
-pub const DECODE_LIMIT: usize = 1 << 20;
 
 impl AttestedData {
     /// The `authority_id` of a record covering a session with `server_name`:
@@ -157,24 +152,6 @@ impl AttestedData {
     /// restates it, so nothing here can drift from it.
     pub fn encode(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
         bincode::encode_to_vec(self, WIRE)
-    }
-
-    /// The record `encode` laid out, read back: what a prover that received
-    /// the notary's bytes (`AttestationWire::attested_data`) builds a witness
-    /// against.
-    ///
-    /// The input must be exactly one record. Trailing bytes are refused, and
-    /// so is a length prefix claiming more than [`DECODE_LIMIT`] bytes, before
-    /// anything is allocated for it.
-    pub fn decode(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
-        let (data, read) =
-            bincode::decode_from_slice(bytes, WIRE.with_limit::<DECODE_LIMIT>())?;
-        if read != bytes.len() {
-            return Err(bincode::error::DecodeError::Other(
-                "bytes follow the attested-data record",
-            ));
-        }
-        Ok(data)
     }
 
     /// What the notary signs, and the only preimage it ever signs
@@ -244,44 +221,6 @@ mod tests {
             hex::encode(sample().digest().unwrap()),
             CROSS_LANGUAGE_DIGEST
         );
-    }
-
-    #[test]
-    fn decode_reads_back_what_encode_laid_out() {
-        let fixture = hex::decode(CROSS_LANGUAGE_FIXTURE).unwrap();
-        assert_eq!(AttestedData::decode(&fixture).unwrap(), sample());
-        assert_eq!(
-            AttestedData::decode(&sample().encode().unwrap()).unwrap(),
-            sample()
-        );
-    }
-
-    #[test]
-    fn decode_refuses_anything_but_exactly_one_record() {
-        let fixture = hex::decode(CROSS_LANGUAGE_FIXTURE).unwrap();
-        assert!(AttestedData::decode(&fixture[..fixture.len() - 1]).is_err());
-        assert!(AttestedData::decode(&[fixture.as_slice(), &[0]].concat()).is_err());
-        assert!(AttestedData::decode(&[]).is_err());
-    }
-
-    #[test]
-    fn decode_refuses_a_length_prefix_past_the_limit_without_allocating_it() {
-        // The sent block's revealed-range count, at HEADER_LEN, claims 2^40
-        // ranges.
-        let mut bytes = hex::decode(CROSS_LANGUAGE_FIXTURE).unwrap();
-        bytes[HEADER_LEN..HEADER_LEN + 8].copy_from_slice(&(1u64 << 40).to_be_bytes());
-        assert!(matches!(
-            AttestedData::decode(&bytes),
-            Err(bincode::error::DecodeError::LimitExceeded)
-        ));
-        // And one range's byte count, past the first range's start.
-        let mut bytes = hex::decode(CROSS_LANGUAGE_FIXTURE).unwrap();
-        let len_at = HEADER_LEN + 8 + 4;
-        bytes[len_at..len_at + 8].copy_from_slice(&(1u64 << 40).to_be_bytes());
-        assert!(matches!(
-            AttestedData::decode(&bytes),
-            Err(bincode::error::DecodeError::LimitExceeded)
-        ));
     }
 
     #[test]

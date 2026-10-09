@@ -297,33 +297,12 @@ pub struct CommitmentOpening {
     pub blinder: Vec<u8>,
 }
 
-/// The same opening in `libid_transcript`'s tlsn-free terms, which is what
-/// [`libid_transcript::ceremony::IdentityLinkWitness::build`] takes.
-impl From<&CommitmentOpening> for libid_transcript::ceremony::Opening {
-    fn from(opening: &CommitmentOpening) -> Self {
-        Self {
-            direction: match opening.direction {
-                Direction::Sent => libid_transcript::ceremony::Direction::Sent,
-                Direction::Received => libid_transcript::ceremony::Direction::Received,
-            },
-            ranges: opening.ranges.clone(),
-            blinder: opening.blinder.clone(),
-        }
-    }
-}
-
 /// Result from the MPC-TLS prover.
 pub struct ProverResult<T> {
     /// The HTTP response body from the platform API (decoded, headers stripped).
     pub response_body: Vec<u8>,
     /// The TLS secrets for proof construction.
     pub secrets: Secrets,
-    /// The bytes this session sent, in full: what the `Sent` openings'
-    /// ranges index into.
-    pub sent: Vec<u8>,
-    /// The bytes this session received, in full: what the `Received`
-    /// openings' ranges index into.
-    pub recv: Vec<u8>,
     /// One opening per commitment this session made, in no particular order:
     /// tlsn hands the commitments back from a set, so a caller finds its
     /// opening by the `ranges` it covers rather than by position. Empty when
@@ -331,26 +310,6 @@ pub struct ProverResult<T> {
     pub commitment_openings: Vec<CommitmentOpening>,
     /// The recovered I/O stream after MPC-TLS completes.
     pub recovered_io: T,
-}
-
-impl<T> ProverResult<T> {
-    /// This session as [`libid_transcript::ceremony::IdentityLinkWitness::build`]
-    /// takes it, with `record` the attested data the notary signed for it.
-    ///
-    /// Consumes the result: the transcript moves rather than being copied,
-    /// and the TLS secrets and recovered I/O are dropped. The decoded response
-    /// body is [`libid_transcript::extract_response_body`] of `held.recv`.
-    pub fn held_session(
-        self,
-        record: libid_transcript::AttestedData,
-    ) -> libid_transcript::ceremony::HeldSession {
-        libid_transcript::ceremony::HeldSession {
-            openings: self.commitment_openings.iter().map(Into::into).collect(),
-            sent: self.sent,
-            recv: self.recv,
-            record,
-        }
-    }
 }
 
 /// Result from the MPC-TLS verifier (notary).
@@ -567,7 +526,6 @@ where
         let transcript = prover.transcript().clone();
         let sent = transcript.sent();
         let recv = transcript.received();
-        let full = (sent.to_vec(), recv.to_vec());
         // The ceremony layouts derive their commitments as the complement of
         // the reveals, so each direction tiles by construction -- which is what
         // the Platform Verifier's coverage check demands.
@@ -698,7 +656,7 @@ where
         })?;
         handle.close();
 
-        Ok((body, secrets, commitment_openings, full))
+        Ok((body, secrets, commitment_openings))
     };
     tokio::pin!(setup);
 
@@ -707,7 +665,7 @@ where
     // already submitted to it may then never resolve, so fail instead of
     // pending forever.
     let mut finished_driver = None;
-    let (body, secrets, commitment_openings, (sent, recv)) = tokio::select! {
+    let (body, secrets, commitment_openings) = tokio::select! {
         biased;
         res = &mut setup => res?,
         driver_res = driver_task.handle_mut() => {
@@ -739,8 +697,6 @@ where
     Ok(ProverResult {
         response_body: body.to_vec(),
         secrets,
-        sent,
-        recv,
         commitment_openings,
         recovered_io,
     })
