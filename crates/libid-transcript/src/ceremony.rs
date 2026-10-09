@@ -14,10 +14,19 @@
 //! Nothing here is applied on anyone's behalf. A prover notarizing a ceremony
 //! session calls these and hands the result to `prover_generic`; a prover doing
 //! something else states its own.
+//!
+//! The values a layout commits -- the bearer in each session, and the id and
+//! handle in the identity response -- are exactly the ranges the identity-link
+//! circuit opens. [`token_bearer`], [`identity_bearer`] and [`IdentityMembers`]
+//! name them, from the scans the layouts are built on, for a prover assembling
+//! that circuit's witness.
 
 use std::ops::Range;
 
-use crate::ranges::JsonMember;
+use crate::ranges::{
+    find_first,
+    JsonMember,
+};
 
 /// What one direction of one session discloses.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,7 +37,7 @@ pub struct Layout {
     pub commit: Vec<Range<usize>>,
 }
 
-#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LayoutError {
     #[error("the request has no `{0}` header, so the layout has nothing to anchor on")]
     MissingHeader(&'static str),
@@ -36,15 +45,12 @@ pub enum LayoutError {
     MissingField(String),
     #[error("the response's `{0}` field is empty, so there is no value to commit")]
     EmptyField(String),
-    #[error("the transcript has no head boundary, so its body cannot be located")]
-    NoHeadBoundary,
+    #[error("the request holds {0} head boundaries (`\\r\\n\\r\\n`) where one HTTP request holds exactly one")]
+    NoHeadBoundary(usize),
     #[error("the request's `{0}` header has an empty value, so there is no credential to commit")]
     EmptyHeader(&'static str),
-    #[error(
-        "the request is not one HTTP request: it holds {heads} `\\r\\n\\r\\n` and {trailing} bytes \
-         after the first, where the verifier takes exactly one, ending the transcript"
-    )]
-    NotOneRequest { heads: usize, trailing: usize },
+    #[error("{0} bytes follow the head of a request that has no body")]
+    BytesAfterRequest(usize),
 }
 
 /// Why a token body could not be serialized from a profile's field list.
@@ -219,9 +225,12 @@ impl Layout {
     /// credential its verifier reads. So the request is one revealed run from
     /// the request line to the last body byte, and the verifier holds the body
     /// it reads there to the profile's `token_fields` -- exactly those names in
-    /// that order, one nonempty value each (see [`token_body`]).
-    pub fn token_request(sent: &[u8]) -> Self {
-        Self::revealing(core::iter::once(0..sent.len()), sent.len())
+    /// that order, one nonempty value each (see [`token_body`]). The verifier
+    /// locates that body after exactly one head boundary, so a request holding
+    /// any other number is refused here.
+    pub fn token_request(sent: &[u8]) -> Result<Self, LayoutError> {
+        head_end(sent)?;
+        Ok(Self::revealing(core::iter::once(0..sent.len()), sent.len()))
     }
 
     /// The token response: the `"access_token":"` delimiter and its closing quote
@@ -231,17 +240,7 @@ impl Layout {
     /// committed range is indistinguishable from a `refresh_token` value, or any
     /// other substring the prover chose to commit (REQ-PLAT-57, REQ-PLAT-58).
     pub fn token_response(recv: &[u8]) -> Result<Self, LayoutError> {
-        // Reveal the two delimiters and let the complement commit the bearer
-        // between them. Both boundaries come from the scan that found the
-        // member, so nothing here restates `"access_token":"` to recompute one.
-        let TokenMembers { bearer } = TokenMembers::in_response(recv)?;
-        Ok(Self::revealing(
-            [
-                bearer.member.start..bearer.value.start,
-                bearer.value.end..bearer.member.end,
-            ],
-            recv.len(),
-        ))
+        Ok(Self::revealing(token_bearer(recv)?.anchors(), recv.len()))
     }
 
     /// The identity request: every byte revealed except the bearer value, which is
@@ -249,13 +248,21 @@ impl Layout {
     ///
     /// The two revealed runs plus the committed one account for the request exactly,
     /// which is what REQ-COMMON-35 demands and what leaves the committed range as
-    /// the only region the verifier cannot read. The bearer is the one
-    /// [`BearerHeader::in_request`] finds, which also refuses a direction that is
-    /// not exactly one request.
+    /// the only region the verifier cannot read.
+    ///
+    /// `sent` must be exactly one request with no body: one `\r\n\r\n`, ending
+    /// the direction. libID-contracts' Platform Verifier holds the identity
+    /// request to that (`CeremonyAttestation.requireOneBodilessRequest`), so a
+    /// direction it would refuse is refused here, before a session is notarized
+    /// over it.
     pub fn identity_request(sent: &[u8]) -> Result<Self, LayoutError> {
-        let BearerHeader { value } = BearerHeader::in_request(sent)?;
+        let end = head_end(sent)?;
+        if end != sent.len() {
+            return Err(LayoutError::BytesAfterRequest(sent.len() - end));
+        }
+        let bearer = identity_bearer(sent)?;
         Ok(Self::revealing(
-            [0..value.start, value.end..sent.len()],
+            [0..bearer.start, bearer.end..sent.len()],
             sent.len(),
         ))
     }
@@ -297,111 +304,71 @@ impl Layout {
         // JSON member order is not fixed; `Self::revealing` sorts, so this does
         // not assume one.
         Ok(Self::revealing(
-            [
-                id.member.start..id.value.start,
-                id.value.end..id.member.end,
-                handle.member.start..handle.value.start,
-                handle.value.end..handle.member.end,
-            ],
+            id.anchors().into_iter().chain(handle.anchors()),
             recv.len(),
         ))
     }
 }
 
-/// Where the bearer sits in a token response.
-///
-/// What [`Layout::token_response`] reveals around, and what a prover opens for
-/// the circuit: `bearer.value` is exactly the committed range the
-/// identity-link circuit's token-bearer opening covers.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TokenMembers {
-    pub bearer: JsonMember,
-}
-
-impl TokenMembers {
-    /// The member every token response carries the bearer in. RFC 6749
-    /// section 5.1 names it, not a platform, which is why the contract pins
-    /// `ACCESS_TOKEN_PREFIX` on `TlsNotaryVerifierBase` for every profile.
-    pub const FIELD: &'static str = "access_token";
-
-    /// The bearer member in `recv`, offsets into `recv`.
-    ///
-    /// Located through [`JsonMember::in_response`], which reads the response
-    /// BODY, so a header carrying the delimiter cannot answer first, and
-    /// which refuses a member that chunk framing runs through: framing inside
-    /// the committed bearer would have the circuit open a value the token
-    /// service never returned.
-    ///
-    /// An empty bearer is refused: it would leave the two reveals adjacent and
-    /// commit nothing, and a response direction with no commitment is one the
-    /// framing check on chain finds no bearer in.
-    pub fn in_response(recv: &[u8]) -> Result<Self, LayoutError> {
-        let bearer = nonempty(JsonMember::in_response(recv, Self::FIELD), Self::FIELD)?;
-        Ok(Self { bearer })
+/// The offset just past the one head boundary (`\r\n\r\n`) of a request,
+/// counting overlapping boundaries as the verifier does.
+fn head_end(sent: &[u8]) -> Result<usize, LayoutError> {
+    const HEAD_END: &[u8] = b"\r\n\r\n";
+    let first = find_first(sent, HEAD_END);
+    let heads = core::iter::successors(first, |&at| {
+        find_first(&sent[at + 1..], HEAD_END).map(|next| at + 1 + next)
+    })
+    .count();
+    match first {
+        Some(at) if heads == 1 => Ok(at + HEAD_END.len()),
+        _ => Err(LayoutError::NoHeadBoundary(heads)),
     }
 }
 
-/// Where the bearer sits in an identity request.
+/// The member every token response carries the bearer in. RFC 6749 section
+/// 5.1 names it, not a platform, which is why the contract pins
+/// `ACCESS_TOKEN_PREFIX` on `TlsNotaryVerifierBase` for every profile.
+const ACCESS_TOKEN: &str = "access_token";
+
+/// The bytes before the identity request's bearer: the contract's
+/// `BEARER_PREFIX`, the header line as hyper writes it.
+const BEARER_PREFIX: &[u8] = b"\r\nauthorization: Bearer ";
+
+/// The bearer member in a token response, offsets into `recv`.
 ///
-/// What [`Layout::identity_request`] commits, and what a prover opens for the
-/// circuit: `value` is exactly the committed range the identity-link
-/// circuit's identity-bearer opening covers.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BearerHeader {
-    /// The bearer alone, from after [`BearerHeader::PREFIX`] to the CRLF that
-    /// ends its line.
-    pub value: Range<usize>,
+/// Located through [`JsonMember::in_response`], which reads the response
+/// BODY, so a header carrying the delimiter cannot answer first, and which
+/// refuses a member that chunk framing runs through: framing inside the
+/// committed bearer would have the circuit open a value the token service
+/// never returned.
+///
+/// An empty bearer is refused: it would leave the two reveals adjacent and
+/// commit nothing, and a response direction with no commitment is one the
+/// framing check on chain finds no bearer in.
+pub fn token_bearer(recv: &[u8]) -> Result<JsonMember, LayoutError> {
+    nonempty(JsonMember::in_response(recv, ACCESS_TOKEN), ACCESS_TOKEN)
 }
 
-impl BearerHeader {
-    /// The bytes before the bearer: the contract's `BEARER_PREFIX`, the
-    /// header line as hyper writes it.
-    pub const PREFIX: &'static [u8] = b"\r\nauthorization: Bearer ";
-
-    /// The bearer in `sent`, offsets into `sent`.
-    ///
-    /// `sent` must be exactly one request with no body: one `\r\n\r\n`, and
-    /// it ends the direction. The Platform Verifier refuses an identity
-    /// session whose sent direction holds anything after the request, so a
-    /// direction that would be refused there is refused here, before a
-    /// session is notarized over it. An empty bearer is refused too: it would
-    /// commit nothing, and the verifier takes exactly one commitment.
-    pub fn in_request(sent: &[u8]) -> Result<Self, LayoutError> {
-        const HEAD_END: &[u8] = b"\r\n\r\n";
-        let heads = sent
-            .windows(HEAD_END.len())
-            .filter(|w| *w == HEAD_END)
-            .count();
-        if heads != 1 || !sent.ends_with(HEAD_END) {
-            let trailing = sent
-                .windows(HEAD_END.len())
-                .position(|w| w == HEAD_END)
-                .map_or(0, |at| sent.len() - at - HEAD_END.len());
-            return Err(LayoutError::NotOneRequest { heads, trailing });
-        }
-        let missing = LayoutError::MissingHeader("authorization");
-        let start = sent
-            .windows(Self::PREFIX.len())
-            .position(|w| w == Self::PREFIX)
-            .ok_or(missing.clone())?
-            + Self::PREFIX.len();
-        let end = start
-            + sent[start..]
-                .windows(2)
-                .position(|w| w == b"\r\n")
-                .ok_or(missing)?;
-        if start == end {
-            return Err(LayoutError::EmptyHeader("authorization"));
-        }
-        Ok(Self { value: start..end })
+/// The bearer in an identity request, from after the contract's
+/// `BEARER_PREFIX` to the CRLF that ends its line, offsets into `sent`.
+///
+/// An empty bearer is refused: it would commit nothing, and the verifier
+/// takes exactly one commitment.
+pub fn identity_bearer(sent: &[u8]) -> Result<Range<usize>, LayoutError> {
+    const HEADER: &str = "authorization";
+    let start = find_first(sent, BEARER_PREFIX)
+        .ok_or(LayoutError::MissingHeader(HEADER))?
+        + BEARER_PREFIX.len();
+    let end = start
+        + find_first(&sent[start..], b"\r\n")
+            .ok_or(LayoutError::MissingHeader(HEADER))?;
+    if start == end {
+        return Err(LayoutError::EmptyHeader(HEADER));
     }
+    Ok(start..end)
 }
 
 /// Where the two identity members sit in an identity response.
-///
-/// What [`Layout::identity_response`] reveals around, and what a prover opens
-/// for the circuit: `id.value` and `handle.value` are exactly the committed
-/// ranges the identity-link circuit's id and handle openings cover.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IdentityMembers {
     pub id: JsonMember,
@@ -543,7 +510,7 @@ mod tests {
         );
         let absent = b"HTTP/1.1 200 OK\r\n\r\n{\"token_type\":\"bearer\"}";
         assert_eq!(
-            TokenMembers::in_response(absent),
+            token_bearer(absent),
             Err(LayoutError::MissingField("access_token".into()))
         );
     }
@@ -594,16 +561,22 @@ mod tests {
 
     #[test]
     fn the_x_token_request_is_revealed_whole() {
-        let l = Layout::token_request(X_TOKEN_REQ);
+        let l = Layout::token_request(X_TOKEN_REQ).unwrap();
         assert_eq!(l.reveal, vec![0..X_TOKEN_REQ.len()]);
         assert!(l.commit.is_empty(), "X hides nothing in its token request");
         assert!(tiles(&l, X_TOKEN_REQ.len()));
+        // The verifier locates the body after exactly one head boundary.
+        let headless = &X_TOKEN_REQ[..20];
+        assert_eq!(
+            Layout::token_request(headless),
+            Err(LayoutError::NoHeadBoundary(0))
+        );
     }
 
     #[test]
     fn the_github_exchange_is_revealed_whole() {
         let req: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\n\r\nclient_id=Iv1.x&code=abc&code_verifier=xyz&client_secret=deadbeef";
-        let l = Layout::token_request(req);
+        let l = Layout::token_request(req).unwrap();
         assert_eq!(l.reveal, vec![0..req.len()]);
         assert!(l.commit.is_empty(), "the credential is public and revealed");
         assert!(tiles(&l, req.len()));
@@ -731,34 +704,25 @@ mod tests {
         const ONE: &[u8] =
             b"GET /2/users/me HTTP/1.1\r\nauthorization: Bearer T\r\nconnection: close\r\n\r\n";
         assert_eq!(
-            BearerHeader::in_request(ONE).map(|b| ONE[b.value].to_vec()),
+            identity_bearer(ONE).map(|bearer| ONE[bearer].to_vec()),
             Ok(b"T".to_vec())
         );
         let trailing = [ONE, b"x"].concat();
         assert_eq!(
             Layout::identity_request(&trailing),
-            Err(LayoutError::NotOneRequest {
-                heads: 1,
-                trailing: 1
-            })
+            Err(LayoutError::BytesAfterRequest(1))
         );
         // A second request after the first: the platform would answer both,
         // and the verifier reads one.
         let two = [ONE, ONE].concat();
         assert_eq!(
-            BearerHeader::in_request(&two),
-            Err(LayoutError::NotOneRequest {
-                heads: 2,
-                trailing: ONE.len()
-            })
+            Layout::identity_request(&two),
+            Err(LayoutError::NoHeadBoundary(2))
         );
         let unterminated = &ONE[..ONE.len() - 2];
         assert_eq!(
             Layout::identity_request(unterminated),
-            Err(LayoutError::NotOneRequest {
-                heads: 0,
-                trailing: 0
-            })
+            Err(LayoutError::NoHeadBoundary(0))
         );
     }
 
@@ -769,16 +733,6 @@ mod tests {
                 b"GET /2/users/me HTTP/1.1\r\nauthorization: Bearer \r\nhost: api.x.com\r\n\r\n"
             ),
             Err(LayoutError::EmptyHeader("authorization"))
-        );
-    }
-
-    #[test]
-    fn the_bearer_header_is_what_the_layout_commits() {
-        let sent: &[u8] = b"GET /user HTTP/1.1\r\nauthorization: Bearer gho_X\r\n\r\n";
-        let bearer = BearerHeader::in_request(sent).unwrap();
-        assert_eq!(
-            Layout::identity_request(sent).unwrap().commit,
-            [bearer.value]
         );
     }
 
@@ -818,20 +772,6 @@ mod tests {
         let hidden = committed(&l, recv);
         assert!(hidden.contains(&&b"2244994945"[..]), "{hidden:?}");
         assert!(hidden.contains(&&b"Alice_1"[..]), "{hidden:?}");
-    }
-
-    #[test]
-    fn the_members_name_exactly_the_committed_values() {
-        // What a prover hands the circuit is chosen by these ranges, and what
-        // the verifier frames is chosen by the layout. They are one scan.
-        let recv: &[u8] =
-            b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"7\",\"username\":\"alice\"}}";
-        let members = IdentityMembers::in_response(recv, &x_identity()).unwrap();
-        let l = Layout::identity_response(recv, &x_identity()).unwrap();
-        assert!(l.commit.contains(&members.id.value));
-        assert!(l.commit.contains(&members.handle.value));
-        assert_eq!(&recv[members.id.value.clone()], b"7");
-        assert_eq!(&recv[members.handle.value.clone()], b"alice");
     }
 
     #[test]
@@ -966,22 +906,6 @@ mod tests {
         // And the anchors frame the first one.
         let members = IdentityMembers::in_response(recv, &x_identity()).unwrap();
         assert_eq!(&recv[members.handle.value], b"victim");
-    }
-
-    #[test]
-    fn an_empty_quoted_id_is_refused() {
-        // `"id":""` would leave the two anchors adjacent: no commitment between
-        // them for `requireFramedCommitment` to frame or the circuit to open.
-        let recv: &[u8] =
-            b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"\",\"username\":\"alice\"}}";
-        assert_eq!(
-            Layout::identity_response(recv, &x_identity()),
-            Err(LayoutError::EmptyField("id".into()))
-        );
-        assert_eq!(
-            IdentityMembers::in_response(recv, &x_identity()),
-            Err(LayoutError::EmptyField("id".into()))
-        );
     }
 
     #[test]

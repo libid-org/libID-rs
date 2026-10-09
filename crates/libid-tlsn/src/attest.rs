@@ -638,7 +638,7 @@ mod tests {
         let sent: &[u8] = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\n\r\ngrant_type=authorization_code&client_id=abc&code_verifier=xyz";
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"access_token\":\"SECRETBEARER\"}";
 
-        let s = Layout::token_request(sent);
+        let s = Layout::token_request(sent).unwrap();
         let r = Layout::token_response(recv).unwrap();
         let data = round_trip(sent, recv, &s, &r);
         assert_tiles(&data.sent, data.sent_transcript_length);
@@ -654,7 +654,7 @@ mod tests {
         let sent: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\n\r\nclient_id=Iv1.x&code=abc&code_verifier=xyz&client_secret=deadbeef";
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"access_token\":\"gho_SECRET\"}";
 
-        let s = Layout::token_request(sent);
+        let s = Layout::token_request(sent).unwrap();
         let r = Layout::token_response(recv).unwrap();
         let data = round_trip(sent, recv, &s, &r);
         assert_tiles(&data.sent, data.sent_transcript_length);

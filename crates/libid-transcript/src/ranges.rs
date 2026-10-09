@@ -120,6 +120,34 @@ fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
+/// The `"key":"value"` member, from the key's opening quote through the
+/// value's closing quote, with whatever JSON whitespace sits between them.
+///
+/// # The template is the reader's
+///
+/// The reader is `CeremonyAttestation.requireFramedCommitment` in
+/// libid-contracts. It finds the value as the commitment whose preceding
+/// revealed range, JSON whitespace beside a structural byte removed
+/// (`_anchoredBy`), ends with the literal `"<name>":"`, and whose next
+/// revealed byte is the closing `"`. So this accepts exactly what that
+/// removal maps onto the literal -- whitespace between the key and the
+/// colon, and between the colon and the value -- and nothing else. Anything
+/// looser picks a range the reader cannot frame: a body written
+/// `"login" "octocat"`, no colon, would be laid out here and then met with
+/// `NoFramedCommitment` on chain, which is the same refusal reported where
+/// nobody can see why. Failing here fails it where the reason is visible.
+///
+/// Uniqueness is NOT checked here, and that is deliberate. The reader
+/// refuses a prefix occurring twice in the bytes it was shown
+/// (`AmbiguousFraming`), and which bytes those are is exactly what a layout
+/// decides -- so `identity_response` reveals one member's anchors and
+/// commits the rest, and the reader sees one. Refusing a second occurrence
+/// here would only stop an honest prover from building that layout; a
+/// dishonest one does not run this code at all.
+pub fn find_json_snippet_range(body: &[u8], field: &str) -> Option<Range<usize>> {
+    JsonMember::in_body(body, field).map(|member| member.member)
+}
+
 /// A `"field":"value"` member, and the value inside it.
 ///
 /// Two ranges rather than one because a caller that reveals the delimiters and
@@ -143,27 +171,14 @@ impl JsonMember {
     /// is the one that locates the body first, and is what a caller building a
     /// reveal layout wants.
     ///
-    /// # The template is the reader's
+    /// A constructor on the type it produces: `json_member_in` restated the type
+    /// in the function name, stranded a preposition on the end of it, and left
+    /// the coordinate system -- the thing this module gets wrong most
+    /// expensively -- unsaid.
     ///
-    /// The reader is `CeremonyAttestation.requireFramedCommitment` in
-    /// libid-contracts. It finds the value as the commitment whose preceding
-    /// revealed range, JSON whitespace beside a structural byte removed
-    /// (`_anchoredBy`), ends with the literal `"<name>":"`, and whose next
-    /// revealed byte is the closing `"`. So this accepts exactly what that
-    /// removal maps onto the literal -- whitespace between the key and the
-    /// colon, and between the colon and the value -- and nothing else. Anything
-    /// looser picks a range the reader cannot frame: a body written
-    /// `"login" "octocat"`, no colon, would be laid out here and then met with
-    /// `NoFramedCommitment` on chain, which is the same refusal reported where
-    /// nobody can see why. Failing here fails it where the reason is visible.
-    ///
-    /// Uniqueness is NOT checked here, and that is deliberate. The reader
-    /// refuses a prefix occurring twice in the bytes it was shown
-    /// (`AmbiguousFraming`), and which bytes those are is exactly what a layout
-    /// decides -- so `identity_response` reveals one member's anchors and
-    /// commits the rest, and the reader sees one. Refusing a second occurrence
-    /// here would only stop an honest prover from building that layout; a
-    /// dishonest one does not run this code at all.
+    /// The template it matches, and why that template is exactly the reader's,
+    /// is argued on [`find_json_snippet_range`], which is the public face of
+    /// this scan.
     fn in_body(body: &[u8], field: &str) -> Option<Self> {
         // The key, then `:`, then the value's opening quote, with the
         // whitespace JSON allows on either side of the colon kept inside the
@@ -189,12 +204,24 @@ impl JsonMember {
     /// between them: both boundaries come from the scan that found them, so no
     /// caller restates the template to recover one.
     ///
-    /// The offsets are the whole difference from `in_body`. A reveal layout
-    /// selects ranges of the TRANSCRIPT, so a body-relative range handed to one
-    /// selects bytes somewhere up in the response headers -- a range that is
-    /// well formed, signed, and pointing at the wrong thing.
+    /// The offsets are the whole difference from `in_body`, and the reason the
+    /// two are named apart rather than left to a `find_`/`compute_` prefix
+    /// nobody can decode. A reveal layout selects ranges of the TRANSCRIPT, so a
+    /// body-relative range handed to one selects bytes somewhere up in the
+    /// response headers -- a range that is well formed, signed, and pointing at
+    /// the wrong thing.
     pub fn in_response(recv: &[u8], field_name: &str) -> Option<Self> {
         Self::locate(recv, field_name, Self::in_body)
+    }
+
+    /// The two runs a layout reveals around a committed value: the member's
+    /// opening through the byte before the value, and the byte after the value
+    /// through the member's close.
+    pub(crate) fn anchors(&self) -> [Range<usize>; 2] {
+        [
+            self.member.start..self.value.start,
+            self.value.end..self.member.end,
+        ]
     }
 
     /// The bare (unquoted) integer member named `field` in `body`: `member`
@@ -269,7 +296,7 @@ impl JsonMember {
 }
 
 /// The first occurrence of `needle`, or nothing.
-fn find_first(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find_first(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
@@ -325,6 +352,37 @@ fn require_contiguous(raw: &[u8], decoded: &[u8]) -> Option<()> {
     (raw == decoded).then_some(())
 }
 
+/// The range of a bare (unquoted) JSON integer member, `"key":<digits>` through
+/// the `,` or `}` that closes the number: [`JsonMember`]'s `member`.
+pub fn find_json_bare_snippet_range(body: &[u8], field: &str) -> Option<Range<usize>> {
+    JsonMember::bare_in_body(body, field).map(|member| member.member)
+}
+
+/// The range of the `"key":"value"` member in an HTTP response, offsets into
+/// `recv`: [`JsonMember::in_response`]'s `member`.
+pub fn compute_field_snippet_range(
+    recv: &[u8],
+    field_name: &str,
+) -> Option<Range<usize>> {
+    JsonMember::in_response(recv, field_name).map(|found| found.member)
+}
+
+/// The range of an id member in an HTTP response, offsets into `recv`:
+/// `quoted` → `"id":"<id>"`, otherwise the bare `"id":<n>` through its `,` or
+/// `}`.
+pub fn compute_id_snippet_range(
+    recv: &[u8],
+    field_name: &str,
+    quoted: bool,
+) -> Option<Range<usize>> {
+    let scan = if quoted {
+        JsonMember::in_response
+    } else {
+        JsonMember::bare_in_response
+    };
+    scan(recv, field_name).map(|found| found.member)
+}
+
 #[cfg(test)]
 mod tests {
     /// A chunk header that is not a hex size used to end the body silently:
@@ -349,26 +407,6 @@ mod tests {
 
     use super::*;
 
-    /// The member range [`JsonMember::in_body`] finds.
-    fn member(body: &[u8], field: &str) -> Option<Range<usize>> {
-        JsonMember::in_body(body, field).map(|found| found.member)
-    }
-
-    /// The member range [`JsonMember::bare_in_body`] finds.
-    fn bare_member(body: &[u8], field: &str) -> Option<Range<usize>> {
-        JsonMember::bare_in_body(body, field).map(|found| found.member)
-    }
-
-    /// The member range [`JsonMember::in_response`] finds.
-    fn member_in(recv: &[u8], field: &str) -> Option<Range<usize>> {
-        JsonMember::in_response(recv, field).map(|found| found.member)
-    }
-
-    /// The member range [`JsonMember::bare_in_response`] finds.
-    fn bare_member_in(recv: &[u8], field: &str) -> Option<Range<usize>> {
-        JsonMember::bare_in_response(recv, field).map(|found| found.member)
-    }
-
     #[test]
     fn extract_response_body_decodes_chunked() {
         let recv = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\n{\"a\":1,\r\n8\r\n\"b\":\"x\"}\r\n0\r\n\r\n";
@@ -377,16 +415,16 @@ mod tests {
     }
 
     #[test]
-    fn a_member_is_found_in_a_body() {
+    fn find_json_snippet_range_simple() {
         let body = br#"{"login":"octocat","id":123}"#;
-        let range = member(body, "login").unwrap();
+        let range = find_json_snippet_range(body, "login").unwrap();
         assert_eq!(&body[range], br#""login":"octocat""#);
     }
 
     #[test]
-    fn a_nested_member_is_found_in_a_body() {
+    fn find_json_snippet_range_nested() {
         let body = br#"{"user":{"login":"octocat"},"body":"hello"}"#;
-        let range = member(body, "login").unwrap();
+        let range = find_json_snippet_range(body, "login").unwrap();
         assert_eq!(&body[range], br#""login":"octocat""#);
     }
 
@@ -396,11 +434,11 @@ mod tests {
         // was shown, and the layout is what decides those. `identity_response`
         // reveals this one's anchors and commits the rest, so the reader sees one.
         let body = br#"{"login":"octocat","user":{"login":"impostor"}}"#;
-        let range = member(body, "login").unwrap();
+        let range = find_json_snippet_range(body, "login").unwrap();
         assert_eq!(&body[range], br#""login":"octocat""#);
 
         let bare = br#"{"id":1,"user":{"id":2}}"#;
-        let range = bare_member(bare, "id").unwrap();
+        let range = find_json_bare_snippet_range(bare, "id").unwrap();
         assert_eq!(&bare[range], br#""id":1,"#);
     }
 
@@ -411,9 +449,9 @@ mod tests {
         // whitespace beside a structural byte before it looks, so the member
         // is found here and revealed with that whitespace at its offsets.
         let body = b"{\n  \"login\" : \"octocat\",\n  \"id\": 583231\n}";
-        let member = member(body, "login").unwrap();
+        let member = find_json_snippet_range(body, "login").unwrap();
         assert_eq!(&body[member], b"\"login\" : \"octocat\"");
-        let id = bare_member(body, "id").unwrap();
+        let id = find_json_bare_snippet_range(body, "id").unwrap();
         assert_eq!(&body[id], b"\"id\": 583231\n}");
     }
 
@@ -422,7 +460,7 @@ mod tests {
         // `"login"` appears first as another member's value; the member is the
         // one a colon and a quote follow.
         let body = br#"{"name":"login","login":"octocat"}"#;
-        let member = member(body, "login").unwrap();
+        let member = find_json_snippet_range(body, "login").unwrap();
         assert_eq!(&body[member], br#""login":"octocat""#);
     }
 
@@ -431,7 +469,7 @@ mod tests {
         // `123 4` is two tokens where one is expected; the reader on chain
         // keeps that space and refuses it as the terminator, and so nothing is
         // revealed for it here.
-        assert_eq!(bare_member(b"{\"id\":123 4}", "id"), None);
+        assert_eq!(find_json_bare_snippet_range(b"{\"id\":123 4}", "id"), None);
     }
 
     #[test]
@@ -444,8 +482,14 @@ mod tests {
             let id = format!("\"id\"{ws}:{ws}123{ws},");
             let recv = format!("HTTP/1.1 200 OK\r\n\r\n{{{id}{member}}}");
             let recv = recv.as_bytes();
-            assert_eq!(&recv[member_in(recv, "login").unwrap()], member.as_bytes());
-            assert_eq!(&recv[bare_member_in(recv, "id").unwrap()], id.as_bytes());
+            assert_eq!(
+                &recv[compute_field_snippet_range(recv, "login").unwrap()],
+                member.as_bytes()
+            );
+            assert_eq!(
+                &recv[compute_id_snippet_range(recv, "id", false).unwrap()],
+                id.as_bytes()
+            );
         }
     }
 
@@ -456,8 +500,8 @@ mod tests {
         // over them here.
         for ws in ["\u{000b}", "\u{000c}"] {
             let body = format!("{{\"login\":{ws}\"octocat\",\"id\":{ws}123}}");
-            assert_eq!(member(body.as_bytes(), "login"), None);
-            assert_eq!(bare_member(body.as_bytes(), "id"), None);
+            assert_eq!(find_json_snippet_range(body.as_bytes(), "login"), None);
+            assert_eq!(find_json_bare_snippet_range(body.as_bytes(), "id"), None);
         }
     }
 
@@ -467,7 +511,7 @@ mod tests {
         // the terminator must be.
         for value in ["1e3", "1.5"] {
             let body = format!("{{\"id\": {value}}}");
-            assert_eq!(bare_member(body.as_bytes(), "id"), None);
+            assert_eq!(find_json_bare_snippet_range(body.as_bytes(), "id"), None);
         }
     }
 
@@ -476,9 +520,9 @@ mod tests {
         // The framing lands in the whitespace rather than in the value, and
         // the member still spans two chunks: refused all the same.
         let recv = straddling(r#"{"login" "#, r#": "alice"}"#);
-        assert!(member_in(&recv, "login").is_none());
+        assert!(compute_field_snippet_range(&recv, "login").is_none());
         let recv = straddling(r#"{"id": "#, r#"123}"#);
-        assert!(bare_member_in(&recv, "id").is_none());
+        assert!(compute_id_snippet_range(&recv, "id", false).is_none());
     }
 
     #[test]
@@ -488,16 +532,16 @@ mod tests {
         // framed integer -- the same answer, given where the reason is not
         // visible.
         let body = br#"{"login":"octocat","id":"7","x":1}"#;
-        assert!(bare_member(body, "id").is_none());
+        assert!(find_json_bare_snippet_range(body, "id").is_none());
     }
 
     #[test]
     fn a_leading_zero_is_refused_but_zero_itself_is_not() {
         // `end - at > 1 && data[at] == "0"` on chain: `0123` is noncanonical,
         // `0` is just zero.
-        assert!(bare_member(br#"{"id":0123,"x":1}"#, "id").is_none());
+        assert!(find_json_bare_snippet_range(br#"{"id":0123,"x":1}"#, "id").is_none());
         let zero = br#"{"id":0,"x":1}"#;
-        let range = bare_member(zero, "id").unwrap();
+        let range = find_json_bare_snippet_range(zero, "id").unwrap();
         assert_eq!(&zero[range], br#""id":0,"#);
     }
 
@@ -505,10 +549,10 @@ mod tests {
     fn a_terminator_the_profile_does_not_fix_is_refused() {
         // Only `,` and `}` close the digits. A `]` means the id sat in an array
         // the profile never described.
-        assert!(bare_member(br#"{"a":[1,"id":7]}"#, "id").is_none());
+        assert!(find_json_bare_snippet_range(br#"{"a":[1,"id":7]}"#, "id").is_none());
         // And digits running to the end of the range have no terminator at all,
         // which is `Found.None` on chain rather than a value.
-        assert!(bare_member(br#"{"id":7"#, "id").is_none());
+        assert!(find_json_bare_snippet_range(br#"{"id":7"#, "id").is_none());
     }
 
     #[test]
@@ -516,25 +560,25 @@ mod tests {
         // `"node_id":` contains `id":` but not `"id":` -- the full delimiter is
         // what keeps a neighbouring member out, on both sides.
         let body = br#"{"node_id":"MDQ=","id":123}"#;
-        let range = bare_member(body, "id").unwrap();
+        let range = find_json_bare_snippet_range(body, "id").unwrap();
         assert_eq!(&body[range], br#""id":123}"#);
     }
 
     #[test]
-    fn an_email_member_is_found_in_a_body() {
+    fn find_json_snippet_range_email() {
         let body = br#"{"email":"alice@example.com","verified":true}"#;
-        let range = member(body, "email").unwrap();
+        let range = find_json_snippet_range(body, "email").unwrap();
         assert_eq!(&body[range], br#""email":"alice@example.com""#);
     }
 
     #[test]
-    fn a_member_is_found_in_a_response() {
+    fn compute_field_snippet_range_from_http() {
         let recv = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"body\":\"hello world\",\"user\":{\"login\":\"alice\"}}";
 
-        let range = member_in(recv, "login").unwrap();
+        let range = compute_field_snippet_range(recv, "login").unwrap();
         assert_eq!(&recv[range], br#""login":"alice""#);
 
-        let range = member_in(recv, "body").unwrap();
+        let range = compute_field_snippet_range(recv, "body").unwrap();
         assert_eq!(&recv[range], br#""body":"hello world""#);
     }
 
@@ -604,6 +648,17 @@ mod tests {
     }
 
     #[test]
+    fn the_member_range_is_the_snippet_range() {
+        // `compute_field_snippet_range` is this with the value dropped, and the
+        // two must not drift apart.
+        let recv = b"HTTP/1.1 200 OK\r\n\r\n{\"login\":\"octocat\",\"id\":1}";
+        assert_eq!(
+            JsonMember::in_response(recv, "login").unwrap().member,
+            compute_field_snippet_range(recv, "login").unwrap()
+        );
+    }
+
+    #[test]
     fn a_bare_integer_s_value_is_the_digits_alone() {
         // The committed range the circuit opens: digits only, never the
         // whitespace before the terminator nor the terminator itself.
@@ -629,13 +684,13 @@ mod tests {
         // middle of the value. Revealed it would put framing inside the handle
         // a verifier reads; committed, inside the bearer a circuit opens.
         let recv = straddling(r#"{"login":"oct"#, r#"ocat","id":1}"#);
-        assert!(member_in(&recv, "login").is_none());
+        assert!(compute_field_snippet_range(&recv, "login").is_none());
     }
 
     #[test]
     fn a_bare_id_split_by_chunk_framing_is_refused() {
         let recv = straddling(r#"{"login":"octocat","id":12"#, r#"34,"x":1}"#);
-        assert!(bare_member_in(&recv, "id").is_none());
+        assert!(compute_id_snippet_range(&recv, "id", false).is_none());
     }
 
     #[test]
@@ -643,55 +698,55 @@ mod tests {
         // The point is contiguity, not chunking: a body that happens to be
         // chunked is fine as long as the member sits in one piece.
         let recv = straddling(r#"{"login":"octocat","#, r#""id":1}"#);
-        let range = member_in(&recv, "login").unwrap();
+        let range = compute_field_snippet_range(&recv, "login").unwrap();
         assert_eq!(&recv[range], br#""login":"octocat""#);
     }
 
     #[test]
-    fn a_missing_member_is_not_found() {
+    fn compute_field_snippet_range_missing_field() {
         let recv =
             b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"foo\":\"bar\"}";
-        assert!(member_in(recv, "missing").is_none());
+        assert!(compute_field_snippet_range(recv, "missing").is_none());
     }
 
-    // ── Bare-integer ids (GitHub) ──────────────────────────────────────────
+    // ── Bare-number id snippets (GitHub) ───────────────────────────────────
 
     #[test]
-    fn a_bare_integer_closed_by_a_comma_is_found() {
+    fn find_json_bare_snippet_range_comma_terminated() {
         // GitHub `/user`: id is a bare number followed by more fields.
         let body = br#"{"login":"octocat","id":123,"node_id":"MDQ="}"#;
-        let range = bare_member(body, "id").unwrap();
+        let range = find_json_bare_snippet_range(body, "id").unwrap();
         assert_eq!(&body[range], br#""id":123,"#);
     }
 
     #[test]
-    fn a_bare_integer_closed_by_a_brace_is_found() {
-        // id is the last field — terminated by `}`. The member includes the
+    fn find_json_bare_snippet_range_brace_terminated() {
+        // id is the last field — terminated by `}`. The snippet includes the
         // `}`, the terminator `requireFramedInteger` reads after the digits.
         let body = br#"{"login":"octocat","id":123}"#;
-        let range = bare_member(body, "id").unwrap();
+        let range = find_json_bare_snippet_range(body, "id").unwrap();
         assert_eq!(&body[range], br#""id":123}"#);
     }
 
     #[test]
-    fn a_bare_integer_closed_by_a_comma_is_found_in_a_response() {
+    fn compute_id_snippet_range_bare_comma() {
         let recv = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"login\":\"octocat\",\"id\":123,\"node_id\":\"x\"}";
-        let range = bare_member_in(recv, "id").unwrap();
+        let range = compute_id_snippet_range(recv, "id", false).unwrap();
         assert_eq!(&recv[range], br#""id":123,"#);
     }
 
     #[test]
-    fn a_bare_integer_closed_by_a_brace_is_found_in_a_response() {
+    fn compute_id_snippet_range_bare_brace_terminated() {
         let recv = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"login\":\"octocat\",\"id\":123}";
-        let range = bare_member_in(recv, "id").unwrap();
+        let range = compute_id_snippet_range(recv, "id", false).unwrap();
         assert_eq!(&recv[range], br#""id":123}"#);
     }
 
     #[test]
-    fn a_quoted_id_is_found_in_a_response() {
-        // X: a quoted id, `"id":"123"`.
+    fn compute_id_snippet_range_quoted_delegates() {
+        // X: quoted id snippet `"id":"123"`.
         let recv = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"data\":{\"id\":\"123\",\"username\":\"alice\"}}";
-        let range = member_in(recv, "id").unwrap();
+        let range = compute_id_snippet_range(recv, "id", true).unwrap();
         assert_eq!(&recv[range], br#""id":"123""#);
     }
 }
