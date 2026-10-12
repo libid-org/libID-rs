@@ -175,11 +175,8 @@ impl JsonMember {
     fn bare_in_body(body: &[u8], field: &str) -> Option<Self> {
         let (start, digits) = key_and_value(body, field, false)?;
         let rest = body.get(digits..)?;
+        // Every digit, a leading zero included: the id rule is not the layout's.
         let width = rest.iter().take_while(|b| b.is_ascii_digit()).count();
-        // A leading zero is noncanonical, and `0` alone is not a leading zero.
-        if width > 1 && rest[0] == b'0' {
-            return None;
-        }
         let end = digits.checked_add(width)?;
 
         // The terminator proves the digits are the whole number (REQ-PLAT-51).
@@ -438,13 +435,15 @@ mod tests {
     }
 
     #[test]
-    fn a_leading_zero_is_refused_but_zero_itself_is_not() {
-        // `end - at > 1 && data[at] == "0"` on chain: `0123` is noncanonical,
-        // `0` is just zero.
-        assert!(bare_member(br#"{"id":0123,"x":1}"#, "id").is_none());
-        let zero = br#"{"id":0,"x":1}"#;
-        let range = bare_member(zero, "id").unwrap();
-        assert_eq!(&zero[range], br#""id":0,"#);
+    fn a_leading_zero_and_zero_itself_are_located() {
+        // Located with every digit rather than reported missing.
+        for (body, value) in [
+            (&br#"{"id":0123,"x":1}"#[..], &b"0123"[..]),
+            (br#"{"id":0,"x":1}"#, b"0"),
+        ] {
+            let found = JsonMember::bare_in_body(body, "id").unwrap();
+            assert_eq!(&body[found.value], value);
+        }
     }
 
     #[test]
