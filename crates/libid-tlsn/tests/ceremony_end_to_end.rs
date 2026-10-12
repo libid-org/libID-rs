@@ -206,7 +206,7 @@ fn normalization_is_the_contract_s() {
     assert_eq!(normalized(b"{\"id\":123 4}"), b"{\"id\":123 4}");
 }
 
-/// The commitments `CeremonyAttestation._anchoredBy` accepts for `prefix`: a
+/// The commitments `CeremonyAttestation.framing` anchors with `prefix`: a
 /// revealed range ends where the commitment starts, and ends, normalized, with
 /// `prefix`.
 fn anchored<'a>(block: &'a DirectionBlock, prefix: &[u8]) -> Vec<&'a RangeCommitment> {

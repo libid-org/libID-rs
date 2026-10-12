@@ -135,7 +135,8 @@ impl JsonMember {
     /// The first member named `field` in `body`, offsets into `body`.
     ///
     /// Accepts whitespace only beside the colon, as the on-chain reader
-    /// (`_anchoredBy`) does. Uniqueness is left to the layout.
+    /// (`CeremonyAttestation.requireFramedCommitment`) does. Uniqueness is
+    /// left to the layout.
     fn in_body(body: &[u8], field: &str) -> Option<Self> {
         // The key, then `:`, then the value's opening quote, with the
         // whitespace JSON allows on either side of the colon kept inside the
