@@ -48,6 +48,7 @@ use tlsn::{
 use witness::{
     identity_link_witness,
     Held,
+    Witness,
 };
 
 /// The server name each session's profile pins: the record's authority.
@@ -420,7 +421,9 @@ fn assert_the_witness_opens_the_record(
 ) {
     let witness = identity_link_witness(profile, token, identity)
         .expect("the witness opens the record");
-    assert_eq!(witness["platform"], profile.platform);
+    assert_eq!(witness.platform, profile.platform);
+    let json = serde_json::to_value(&witness).unwrap();
+    assert_eq!(serde_json::from_value::<Witness>(json).unwrap(), witness);
 
     // Each value opens the commitment the verifier's rules select, recomputed
     // with `sha2` independently of the builder.
@@ -442,30 +445,26 @@ fn assert_the_witness_opens_the_record(
         format!("\"{}\":\"", session.handle_field).as_bytes(),
         quote,
     );
-    for (name, bytes, framed) in [
+    for (name, opened, bytes, framed) in [
         (
             "token_bearer",
+            &witness.token_bearer,
             &token.recv,
             framed(&token.record.received, b"\"access_token\":\"", quote),
         ),
         (
             "identity_bearer",
+            &witness.identity_bearer,
             &identity.sent,
             framed_bearer(&identity.record.sent),
         ),
-        ("id", &identity.recv, id),
-        ("handle", &identity.recv, handle),
+        ("id", &witness.id, &identity.recv, id),
+        ("handle", &witness.handle, &identity.recv, handle),
     ] {
-        let opened = &witness[name];
-        assert_eq!(opened["commitment"], hex0x(&framed.commitment), "{name}");
+        assert_eq!(opened.commitment, hex0x(&framed.commitment), "{name}");
         let value = covered(bytes, framed);
-        assert_eq!(
-            opened["value"].as_str().unwrap().as_bytes(),
-            value,
-            "{name}"
-        );
-        let blinder = opened["blinder"].as_str().unwrap();
-        let blinder = hex::decode(blinder.strip_prefix("0x").unwrap()).unwrap();
+        assert_eq!(opened.value.as_bytes(), value, "{name}");
+        let blinder = hex::decode(opened.blinder.strip_prefix("0x").unwrap()).unwrap();
         assert_eq!(blinder.len(), 16, "{name}: the blinder is 16 bytes");
         assert_eq!(sha256(value, &blinder), framed.commitment, "{name}");
     }

@@ -423,8 +423,10 @@ async fn main() {
     file["token"] = x_token;
     file["identity"] = x_identity;
     // For the circuit's tests.
-    file["identity_link_witness"] =
-        identity_link_witness(&x, &token, &identity).expect("x identity-link witness");
+    file["identity_link_witness"] = serde_json::to_value(
+        identity_link_witness(&x, &token, &identity).expect("x identity-link witness"),
+    )
+    .unwrap();
     std::fs::write(
         out.join("x-ceremony-session.json"),
         serde_json::to_string_pretty(&file).unwrap() + "\n",
@@ -522,8 +524,11 @@ async fn main() {
     let mut file = common("github");
     file["token"] = github_token;
     file["identity"] = github_identity;
-    file["identity_link_witness"] = identity_link_witness(&github, &token, &identity)
-        .expect("github identity-link witness");
+    file["identity_link_witness"] = serde_json::to_value(
+        identity_link_witness(&github, &token, &identity)
+            .expect("github identity-link witness"),
+    )
+    .unwrap();
     std::fs::write(
         out.join("github-ceremony-session.json"),
         serde_json::to_string_pretty(&file).unwrap() + "\n",

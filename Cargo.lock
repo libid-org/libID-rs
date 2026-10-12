@@ -3423,6 +3423,7 @@ dependencies = [
  "libid-crypto",
  "libid-transcript",
  "rangeset",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",

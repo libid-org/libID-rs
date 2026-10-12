@@ -18,9 +18,9 @@ use libid_transcript::{
         Profile,
     },
 };
-use serde_json::{
-    json,
-    Value,
+use serde::{
+    Deserialize,
+    Serialize,
 };
 use sha2::Digest as _;
 
@@ -35,16 +35,31 @@ pub struct Held {
     pub record: AttestedData,
 }
 
-/// `identity_link_witness` for `profile`'s token and identity sessions:
-/// `{platform, token_bearer, identity_bearer, id, handle}`, each value
-/// `{value, blinder, commitment}`, the value as the wire carried it and the
-/// other two `0x` lowercase hex. An error names the value that failed and
-/// never carries a value or a blinder.
+/// The identity-link circuit's witness: the platform and four openings.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Witness {
+    pub platform: String,
+    pub token_bearer: Opening,
+    pub identity_bearer: Opening,
+    pub id: Opening,
+    pub handle: Opening,
+}
+
+/// One committed value: as the wire carried it, then `0x` lowercase hex.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Opening {
+    pub value: String,
+    pub blinder: String,
+    pub commitment: String,
+}
+
+/// The witness for `profile`'s token and identity sessions. An error names
+/// the value that failed and never carries a value or a blinder.
 pub fn identity_link_witness(
     profile: &Profile,
     token: &Held,
     identity: &Held,
-) -> Result<Value, String> {
+) -> Result<Witness, String> {
     let session = profile.identity.ok_or_else(|| {
         format!("the `{}` profile has no identity session", profile.platform)
     })?;
@@ -63,18 +78,23 @@ pub fn identity_link_witness(
         Direction::Sent,
         identity_bearer,
     )?;
-    if token_bearer["value"] != identity_bearer["value"] {
+    if token_bearer.value != identity_bearer.value {
         return Err(
             "the token response's bearer and the identity request's bearer differ".into(),
         );
     }
-    Ok(json!({
-        "platform": profile.platform,
-        "token_bearer": token_bearer,
-        "identity_bearer": identity_bearer,
-        "id": open("id", identity, Direction::Received, members.id.value)?,
-        "handle": open("handle", identity, Direction::Received, members.handle.value)?,
-    }))
+    Ok(Witness {
+        platform: profile.platform.into(),
+        token_bearer,
+        identity_bearer,
+        id: open("id", identity, Direction::Received, members.id.value)?,
+        handle: open(
+            "handle",
+            identity,
+            Direction::Received,
+            members.handle.value,
+        )?,
+    })
 }
 
 /// The opening of the commitment over exactly `range`, checked against the
@@ -84,7 +104,7 @@ fn open(
     at: &Held,
     direction: Direction,
     range: Range<usize>,
-) -> Result<Value, String> {
+) -> Result<Opening, String> {
     let opening = at
         .openings
         .iter()
@@ -113,11 +133,11 @@ fn open(
         ));
     }
     let value = ascii(value).ok_or_else(|| format!("{what}: not ASCII"))?;
-    Ok(json!({
-        "value": value,
-        "blinder": hex0x(&opening.blinder),
-        "commitment": hex0x(&commitment),
-    }))
+    Ok(Opening {
+        value: value.into(),
+        blinder: hex0x(&opening.blinder),
+        commitment: hex0x(&commitment),
+    })
 }
 
 /// A committed value as text: the witness and the identity request carry it
