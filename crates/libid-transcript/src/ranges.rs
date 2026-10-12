@@ -127,7 +127,7 @@ pub struct JsonMember {
     /// a bare integer through the whitespace and the `,` or `}` after it.
     pub member: Range<usize>,
     /// The value without quotes: the bytes between them, empty for `""`, or
-    /// the digits.
+    /// the digits, empty when none precede the terminator.
     pub value: Range<usize>,
 }
 
@@ -175,9 +175,6 @@ impl JsonMember {
         let (start, digits) = key_and_value(body, field, false)?;
         let rest = body.get(digits..)?;
         let width = rest.iter().take_while(|b| b.is_ascii_digit()).count();
-        if width == 0 {
-            return None;
-        }
         // A leading zero is noncanonical, and `0` alone is not a leading zero.
         if width > 1 && rest[0] == b'0' {
             return None;
@@ -428,6 +425,15 @@ mod tests {
         // `"id":"7",`.
         let body = br#"{"login":"octocat","id":"7","x":1}"#;
         assert!(bare_member(body, "id").is_none());
+    }
+
+    #[test]
+    fn a_bare_member_with_no_digits_has_an_empty_value() {
+        // Found, so the layout reports the field empty rather than missing.
+        for body in [&br#"{"id": ,"x":1}"#[..], br#"{"id":}"#] {
+            let found = JsonMember::bare_in_body(body, "id").unwrap();
+            assert!(found.value.is_empty(), "{found:?}");
+        }
     }
 
     #[test]

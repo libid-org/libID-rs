@@ -702,6 +702,16 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_bare_id_is_refused_as_empty() {
+        let recv: &[u8] =
+            b"HTTP/1.1 200 OK\r\n\r\n{\"login\":\"octocat\",\"id\": ,\"x\":1}";
+        assert_eq!(
+            Layout::identity_response(recv, &github_identity()),
+            Err(LayoutError::EmptyField("id".into()))
+        );
+    }
+
+    #[test]
     fn the_github_identity_response_reveals_the_id_terminator_and_commits_the_digits() {
         // The bare id closes on a revealed `,` or `}`, which proves the
         // committed digits are the whole number.
