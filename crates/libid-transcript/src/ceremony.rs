@@ -21,18 +21,25 @@ pub struct Layout {
     pub commit: Vec<Range<usize>>,
 }
 
+/// Why a session's bytes admit no layout.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LayoutError {
+    /// The named request header is absent.
     #[error("the request has no `{0}` header, so the layout has nothing to anchor on")]
     MissingHeader(&'static str),
+    /// The named response member is absent or malformed.
     #[error("the response carries no `{0}` field where the profile expects one")]
     MissingField(String),
+    /// The named response member has an empty value.
     #[error("the response's `{0}` field is empty, so there is no value to commit")]
     EmptyField(String),
+    /// The request holds this many head boundaries, not one.
     #[error("the request holds {0} head boundaries (`\\r\\n\\r\\n`) where one HTTP request holds exactly one")]
     NoHeadBoundary(usize),
+    /// The named request header has an empty value.
     #[error("the request's `{0}` header has an empty value, so there is no credential to commit")]
     EmptyHeader(&'static str),
+    /// This many bytes follow the head of a bodiless request.
     #[error("{0} bytes follow the head of a request that has no body")]
     BytesAfterRequest(usize),
 }
@@ -262,7 +269,9 @@ pub fn identity_bearer(sent: &[u8]) -> Result<Range<usize>, LayoutError> {
 /// Where the two identity members sit in an identity response.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IdentityMembers {
+    /// The profile's id member.
     pub id: JsonMember,
+    /// The profile's handle member.
     pub handle: JsonMember,
 }
 
