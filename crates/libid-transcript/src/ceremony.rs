@@ -148,10 +148,6 @@ fn complement(reveal: &[Range<usize>], len: usize) -> Vec<Range<usize>> {
 /// what a Platform Verifier compares it against come from one place. A table
 /// written again here would be a second copy of values whose whole problem is
 /// that copies drift in silence.
-///
-/// [`IdShape`] used to be declared here. It said the same thing the generated
-/// one says, and two spellings of one profile fact is the drift this crate now
-/// takes the table to avoid.
 pub use libid_profiles::{
     self as profiles,
     IdShape,
@@ -161,36 +157,9 @@ pub use libid_profiles::{
 };
 
 impl Layout {
-    /// A layout that reveals these ranges of a direction `len` bytes long, and
-    /// commits everything they leave.
-    ///
-    /// The one door into a tiling `Layout`, and the reason every constructor below
-    /// tiles by construction rather than by inspection: no constructor states
-    /// `commit`, so no constructor's list can disagree with the reveals it was
-    /// supposed to complement. `layout` -- a lowercase homonym of the type it
-    /// built, in a module about layouts -- said none of that.
-    ///
-    /// `complement` walks the reveals once, taking each as starting where the last
-    /// one ended, so unsorted input reads as overlap and yields a complement that
-    /// tiles nothing -- which the Platform Verifier rejects and nothing here would
-    /// catch. Sorting is done once, here, so no caller has to remember: the
-    /// layouts that build in order are unaffected, and
-    /// [`Layout::identity_response`], whose two members arrive in whatever order
-    /// the platform serialized them, carries no sort of its own. Overlapping input
-    /// is a caller bug that sorting cannot repair, and the debug assertion is what
-    /// says so.
-    ///
-    /// Private, and `Layout`'s fields stay public beside it. A prover outside
-    /// this module may state a layout this module does not know, so tiling is a
-    /// property of these constructors and not of the type. A public constructor
-    /// advertising a guarantee the type does not enforce would be worse than no
-    /// public constructor at all.
-    ///
-    /// It takes an iterator rather than a `Vec` so that a one-range layout is
-    /// spelled `core::iter::once(a..b)`. Both `vec![a..b]` and `[a..b]` trip
-    /// `clippy::single_range_in_vec_init`, a lint that exists to catch `vec![0; n]`
-    /// typos and cannot tell this apart from one; the iterator form says what is
-    /// meant without a named helper standing in for it.
+    /// A layout that reveals these ranges of a direction `len` bytes long and
+    /// commits the rest. Sorts the reveals, which must not overlap; the only
+    /// constructor, so every layout built here tiles.
     fn revealing(reveal: impl IntoIterator<Item = Range<usize>>, len: usize) -> Self {
         let mut reveal: Vec<Range<usize>> = reveal.into_iter().collect();
         reveal.sort_by_key(|r| r.start);
