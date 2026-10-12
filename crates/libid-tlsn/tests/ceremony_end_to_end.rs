@@ -26,6 +26,7 @@ use libid_transcript::{
     },
     ceremony::{
         profiles,
+        token_body,
         Layout,
     },
 };
@@ -57,7 +58,7 @@ const X_ID_HOST: &str = profiles::X.identity.unwrap().session.authority;
 const GITHUB_TOKEN_HOST: &str = profiles::GITHUB.token.unwrap().session.authority;
 const GITHUB_ID_HOST: &str = profiles::GITHUB.identity.unwrap().session.authority;
 
-const TOKEN_SENT: &[u8] = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\n\r\ngrant_type=authorization_code&client_id=abc&code_verifier=5teBDl6cz4U77aFweV5PbMhBJ_lEFv6LLNKzqnDI5lo";
+const TOKEN_SENT: &[u8] = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: 157\r\n\r\ngrant_type=authorization_code&client_id=abc&code=abc123&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier=5teBDl6cz4U77aFweV5PbMhBJ_lEFv6LLNKzqnDI5lo";
 const TOKEN_RECV: &[u8] =
     b"HTTP/1.1 200 OK\r\n\r\n{\"token_type\":\"bearer\",\"access_token\":\"SECRETBEARER\"}";
 const ID_SENT: &[u8] = b"GET /2/users/me HTTP/1.1\r\nhost: api.x.com\r\nauthorization: Bearer SECRETBEARER\r\nconnection: close\r\n\r\n";
@@ -65,7 +66,7 @@ const ID_RECV: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"id\":\"2244994945\"
 
 /// GitHub's token exchange and `/user` read, pretty-printed as GitHub serves
 /// it: whitespace after each colon, and before the `,` closing the id.
-const GITHUB_TOKEN_SENT: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\n\r\nclient_id=Iv1.x&code=abc&code_verifier=xyz&client_secret=deadbeef";
+const GITHUB_TOKEN_SENT: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: 109\r\n\r\nclient_id=Iv1.x&code=abc&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier=xyz&client_secret=deadbeef";
 const GITHUB_TOKEN_RECV: &[u8] =
     b"HTTP/1.1 200 OK\r\n\r\n{\"access_token\":\"gho_SECRETBEARER\",\"token_type\":\"bearer\",\"scope\":\"\"}";
 const GITHUB_ID_SENT: &[u8] = b"GET /user HTTP/1.1\r\nhost: api.github.com\r\nauthorization: Bearer gho_SECRETBEARER\r\nconnection: close\r\n\r\n";
@@ -300,6 +301,40 @@ fn framed_bearer(block: &DirectionBlock) -> &RangeCommitment {
 /// The bytes a commitment covers, from the full transcript.
 fn covered<'a>(recv: &'a [u8], c: &RangeCommitment) -> &'a [u8] {
     &recv[c.start as usize..c.end as usize]
+}
+
+/// The token fixtures' bodies are what `token_body` serializes from each
+/// profile's form.
+#[test]
+fn the_token_fixtures_carry_the_profile_forms() {
+    let body = |sent: &[u8]| {
+        let at = sent.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        String::from_utf8(sent[at..].to_vec()).unwrap()
+    };
+    let x = token_body(
+        &profiles::X.token.unwrap(),
+        &[
+            ("client_id", "abc"),
+            ("code", "abc123"),
+            ("redirect_uri", "https://app.example/cb"),
+            (
+                "code_verifier",
+                "5teBDl6cz4U77aFweV5PbMhBJ_lEFv6LLNKzqnDI5lo",
+            ),
+        ],
+    );
+    assert_eq!(x, Ok(body(TOKEN_SENT)));
+    let github = token_body(
+        &profiles::GITHUB.token.unwrap(),
+        &[
+            ("client_id", "Iv1.x"),
+            ("code", "abc"),
+            ("redirect_uri", "https://app.example/cb"),
+            ("code_verifier", "xyz"),
+            ("client_secret", "deadbeef"),
+        ],
+    );
+    assert_eq!(github, Ok(body(GITHUB_TOKEN_SENT)));
 }
 
 #[test]
@@ -562,7 +597,7 @@ fn both_sessions_encode_and_carry_their_own_lengths() {
 /// included: it is a public credential the verifier reads.
 #[test]
 fn the_github_exchange_is_revealed_whole() {
-    const SENT: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\n\r\nclient_id=Iv1.x&code=abc&code_verifier=xyz&client_secret=deadbeef";
+    const SENT: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: 109\r\n\r\nclient_id=Iv1.x&code=abc&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier=xyz&client_secret=deadbeef";
     const RECV: &[u8] =
         b"HTTP/1.1 200 OK\r\n\r\n{\"token_type\":\"bearer\",\"access_token\":\"SECRETBEARER\"}";
 

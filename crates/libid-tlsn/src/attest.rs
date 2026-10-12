@@ -635,7 +635,7 @@ mod tests {
 
     #[test]
     fn the_x_token_session_layout_tiles() {
-        let sent: &[u8] = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\n\r\ngrant_type=authorization_code&client_id=abc&code_verifier=xyz";
+        let sent: &[u8] = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: 114\r\n\r\ngrant_type=authorization_code&client_id=abc&code=abc&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier=xyz";
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"access_token\":\"SECRETBEARER\"}";
 
         let s = Layout::token_request(sent).unwrap();
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn the_github_exchange_layout_reveals_the_credential() {
-        let sent: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\n\r\nclient_id=Iv1.x&code=abc&code_verifier=xyz&client_secret=deadbeef";
+        let sent: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: 109\r\n\r\nclient_id=Iv1.x&code=abc&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier=xyz&client_secret=deadbeef";
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"access_token\":\"gho_SECRET\"}";
 
         let s = Layout::token_request(sent).unwrap();
