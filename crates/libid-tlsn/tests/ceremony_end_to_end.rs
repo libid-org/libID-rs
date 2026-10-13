@@ -303,14 +303,30 @@ fn covered<'a>(recv: &'a [u8], c: &RangeCommitment) -> &'a [u8] {
     &recv[c.start as usize..c.end as usize]
 }
 
+/// A request's head and body, split at the blank line.
+fn head_and_body(sent: &[u8]) -> (&str, &str) {
+    let text = std::str::from_utf8(sent).unwrap();
+    text.split_once("\r\n\r\n").unwrap()
+}
+
+/// Each token fixture's `content-length` is its body's length.
+#[test]
+fn the_token_fixtures_declare_their_body_length() {
+    for sent in [TOKEN_SENT, GITHUB_TOKEN_SENT] {
+        let (head, body) = head_and_body(sent);
+        let declared = head
+            .split("\r\n")
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .unwrap();
+        assert_eq!(declared.parse::<usize>(), Ok(body.len()), "{head}");
+    }
+}
+
 /// The token fixtures' bodies are what `token_body` serializes from each
 /// profile's form.
 #[test]
 fn the_token_fixtures_carry_the_profile_forms() {
-    let body = |sent: &[u8]| {
-        let at = sent.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-        String::from_utf8(sent[at..].to_vec()).unwrap()
-    };
+    let body = |sent: &[u8]| head_and_body(sent).1.to_owned();
     let x = token_body(
         &profiles::X.token.unwrap(),
         &[
@@ -597,18 +613,25 @@ fn both_sessions_encode_and_carry_their_own_lengths() {
 /// included: it is a public credential the verifier reads.
 #[test]
 fn the_github_exchange_is_revealed_whole() {
-    const SENT: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: 109\r\n\r\nclient_id=Iv1.x&code=abc&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier=xyz&client_secret=deadbeef";
     const RECV: &[u8] =
         b"HTTP/1.1 200 OK\r\n\r\n{\"token_type\":\"bearer\",\"access_token\":\"SECRETBEARER\"}";
 
-    let sl = Layout::token_request(SENT).unwrap();
+    let sl = Layout::token_request(GITHUB_TOKEN_SENT).unwrap();
     let rl = Layout::token_response(RECV).unwrap();
-    let data = record(SENT, RECV, &sl, &rl, GITHUB_TOKEN_HOST, 1_770_000_000).record;
+    let data = record(
+        GITHUB_TOKEN_SENT,
+        RECV,
+        &sl,
+        &rl,
+        GITHUB_TOKEN_HOST,
+        1_770_000_000,
+    )
+    .record;
 
     assert_tiles(&data.sent, data.sent_transcript_length, "github exchange");
     assert_eq!(data.sent.revealed.len(), 1);
     assert_eq!(data.sent.revealed[0].start, 0);
-    assert_eq!(data.sent.revealed[0].bytes.len(), SENT.len());
+    assert_eq!(data.sent.revealed[0].bytes.len(), GITHUB_TOKEN_SENT.len());
     assert!(data.sent.commitments.is_empty());
     assert_eq!(count(&joined(&data.sent), b"deadbeef"), 1);
 }
