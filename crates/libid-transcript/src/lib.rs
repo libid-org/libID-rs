@@ -31,6 +31,7 @@ pub use ranges::{
     find_request_line_range,
     find_response_body_range,
     JsonMember,
+    NotBareInteger,
 };
 pub use wire::{
     read_msg,

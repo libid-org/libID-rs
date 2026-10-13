@@ -10,6 +10,7 @@ use std::ops::Range;
 use crate::ranges::{
     find_first,
     JsonMember,
+    NotBareInteger,
 };
 
 /// What one direction of one session discloses.
@@ -27,9 +28,12 @@ pub enum LayoutError {
     /// The named request header is absent.
     #[error("the request has no `{0}` header, so the layout has nothing to anchor on")]
     MissingHeader(&'static str),
-    /// The named response member is absent or malformed.
+    /// The named response member is absent, or split by the raw transcript's chunk framing.
     #[error("the response carries no `{0}` field where the profile expects one")]
     MissingField(String),
+    /// The named response member is present, but not digits closed by `,` or `}`.
+    #[error("the response's `{0}` field is not a bare integer closed by `,` or `}}`")]
+    NotBareInteger(String),
     /// The named response member has an empty value.
     #[error("the response's `{0}` field is empty, so there is no value to commit")]
     EmptyField(String),
@@ -277,7 +281,7 @@ pub struct IdentityMembers {
 
 impl IdentityMembers {
     /// Both members of `session`'s profile in `recv`, offsets into `recv`.
-    /// Refused when either value is empty.
+    /// Refused when either value is empty, or a bare id is malformed.
     pub fn in_response(
         recv: &[u8],
         session: &IdentitySession,
@@ -285,7 +289,8 @@ impl IdentityMembers {
         let (id_field, handle_field) = (session.id_field, session.handle_field);
         let id = match session.id_shape {
             IdShape::JsonString => JsonMember::in_response(recv, id_field),
-            IdShape::JsonInteger => JsonMember::bare_in_response(recv, id_field),
+            IdShape::JsonInteger => JsonMember::bare_in_response(recv, id_field)
+                .map_err(|NotBareInteger| LayoutError::NotBareInteger(id_field.into()))?,
         };
         let id = nonempty(id, id_field)?;
         let handle = nonempty(JsonMember::in_response(recv, handle_field), handle_field)?;
@@ -733,14 +738,28 @@ mod tests {
         );
 
         // And GitHub's shape wants digits where X puts a quoted string, so it
-        // fails on the id as well rather than reaching the handle. It did not
-        // always: the bare reader used to stop at the first `,`, which returned
-        // `"id":"7",` -- a quoted value read as though it were a number -- and
-        // left the mismatch to be caught by the handle name instead.
+        // fails on the id as well rather than reaching the handle.
         assert_eq!(
             Layout::identity_response(x, &github_identity()),
-            Err(LayoutError::MissingField("id".into()))
+            Err(LayoutError::NotBareInteger("id".into()))
         );
+    }
+
+    #[test]
+    fn a_bare_id_that_is_not_digits_closed_by_a_comma_or_brace_is_malformed() {
+        for body in [
+            &br#"{"login":"octocat","id":"583231"}"#[..],
+            br#"{"login":"octocat","id":1e3}"#,
+            br#"{"login":"octocat","id":583231]"#,
+        ] {
+            let recv = [&b"HTTP/1.1 200 OK\r\n\r\n"[..], body].concat();
+            assert_eq!(
+                IdentityMembers::in_response(&recv, &github_identity()),
+                Err(LayoutError::NotBareInteger("id".into())),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[test]

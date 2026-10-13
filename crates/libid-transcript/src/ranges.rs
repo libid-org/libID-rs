@@ -131,6 +131,10 @@ pub struct JsonMember {
     pub value: Range<usize>,
 }
 
+/// A member whose key is present but whose value is not a bare integer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotBareInteger;
+
 impl JsonMember {
     /// The first member named `field` in `body`, offsets into `body`.
     ///
@@ -191,9 +195,24 @@ impl JsonMember {
     }
 
     /// The bare integer member named `field_name` in an HTTP response's body,
-    /// offsets into the raw `recv` transcript.
-    pub fn bare_in_response(recv: &[u8], field_name: &str) -> Option<Self> {
-        Self::locate(recv, field_name, Self::bare_in_body)
+    /// offsets into the raw `recv` transcript. `Err` when the decoded body has
+    /// the key but its value is not digits closed by `,` or `}`.
+    pub fn bare_in_response(
+        recv: &[u8],
+        field_name: &str,
+    ) -> core::result::Result<Option<Self>, NotBareInteger> {
+        if let Some(found) = Self::locate(recv, field_name, Self::bare_in_body) {
+            return Ok(Some(found));
+        }
+        let malformed = extract_response_body(recv).is_ok_and(|body| {
+            key_and_value(&body, field_name, false).is_some()
+                && Self::bare_in_body(&body, field_name).is_none()
+        });
+        if malformed {
+            Err(NotBareInteger)
+        } else {
+            Ok(None)
+        }
     }
 
     /// `scan` over the response body of `recv`, offsets into `recv`. The raw
@@ -379,7 +398,10 @@ mod tests {
                 member.as_bytes()
             );
             assert_eq!(
-                &recv[JsonMember::bare_in_response(recv, "id").unwrap().member],
+                &recv[JsonMember::bare_in_response(recv, "id")
+                    .unwrap()
+                    .unwrap()
+                    .member],
                 id.as_bytes()
             );
         }
@@ -414,7 +436,7 @@ mod tests {
         let recv = straddling(r#"{"login" "#, r#": "alice"}"#);
         assert!(JsonMember::in_response(&recv, "login").is_none());
         let recv = straddling(r#"{"id": "#, r#"123}"#);
-        assert!(JsonMember::bare_in_response(&recv, "id").is_none());
+        assert_eq!(JsonMember::bare_in_response(&recv, "id"), Ok(None));
     }
 
     #[test]
@@ -554,7 +576,7 @@ mod tests {
         ] {
             let recv = format!("HTTP/1.1 200 OK\r\n\r\n{body}");
             let recv = recv.as_bytes();
-            let found = JsonMember::bare_in_response(recv, "id").unwrap();
+            let found = JsonMember::bare_in_response(recv, "id").unwrap().unwrap();
             assert_eq!(&recv[found.value.clone()], b"583231");
             assert_eq!(&recv[found.value.end..found.member.end], tail);
             assert!(recv[found.member.start..found.value.start].starts_with(b"\"id\":"));
@@ -573,7 +595,7 @@ mod tests {
     #[test]
     fn a_bare_id_split_by_chunk_framing_is_refused() {
         let recv = straddling(r#"{"login":"octocat","id":12"#, r#"34,"x":1}"#);
-        assert!(JsonMember::bare_in_response(&recv, "id").is_none());
+        assert_eq!(JsonMember::bare_in_response(&recv, "id"), Ok(None));
     }
 
     #[test]
