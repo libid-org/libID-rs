@@ -46,6 +46,9 @@ pub enum LayoutError {
     /// This many bytes follow the head of a bodiless request.
     #[error("{0} bytes follow the head of a request that has no body")]
     BytesAfterRequest(usize),
+    /// Two ranges a layout would reveal overlap.
+    #[error("the reveal ranges {0:?} and {1:?} overlap")]
+    OverlappingReveals(Range<usize>, Range<usize>),
 }
 
 /// Why a token body could not be serialized from a profile's field list.
@@ -169,30 +172,35 @@ pub use libid_profiles::{
 
 impl Layout {
     /// A layout that reveals these ranges of a direction `len` bytes long and
-    /// commits the rest. Sorts the reveals, which must not overlap; the only
-    /// constructor, so every layout built here tiles.
-    fn revealing(reveal: impl IntoIterator<Item = Range<usize>>, len: usize) -> Self {
+    /// commits the rest. Sorts the reveals, and refuses two that overlap; the
+    /// only constructor, so every layout built here tiles.
+    fn revealing(
+        reveal: impl IntoIterator<Item = Range<usize>>,
+        len: usize,
+    ) -> Result<Self, LayoutError> {
         let mut reveal: Vec<Range<usize>> = reveal.into_iter().collect();
         reveal.sort_by_key(|r| r.start);
-        debug_assert!(
-            reveal.windows(2).all(|pair| pair[0].end <= pair[1].start),
-            "reveal ranges overlap: {reveal:?}"
-        );
+        if let Some(pair) = reveal.windows(2).find(|pair| pair[0].end > pair[1].start) {
+            return Err(LayoutError::OverlappingReveals(
+                pair[0].clone(),
+                pair[1].clone(),
+            ));
+        }
         let commit = complement(&reveal, len);
-        Layout { reveal, commit }
+        Ok(Layout { reveal, commit })
     }
 
     /// The token request, revealed whole. Refused unless it holds exactly one
     /// head boundary, as the verifier requires.
     pub fn token_request(sent: &[u8]) -> Result<Self, LayoutError> {
         head_end(sent)?;
-        Ok(Self::revealing(core::iter::once(0..sent.len()), sent.len()))
+        Self::revealing(core::iter::once(0..sent.len()), sent.len())
     }
 
     /// The token response: the bearer's anchors revealed, everything else
     /// committed.
     pub fn token_response(recv: &[u8]) -> Result<Self, LayoutError> {
-        Ok(Self::revealing(token_bearer(recv)?.anchors(), recv.len()))
+        Self::revealing(token_bearer(recv)?.anchors(), recv.len())
     }
 
     /// The identity request: everything revealed but the committed bearer.
@@ -204,10 +212,7 @@ impl Layout {
             return Err(LayoutError::BytesAfterRequest(sent.len() - end));
         }
         let bearer = identity_bearer(sent)?;
-        Ok(Self::revealing(
-            [0..bearer.start, bearer.end..sent.len()],
-            sent.len(),
-        ))
+        Self::revealing([0..bearer.start, bearer.end..sent.len()], sent.len())
     }
 
     /// The identity response: the anchors of the id and handle revealed, each
@@ -221,10 +226,7 @@ impl Layout {
 
         // JSON member order is not fixed; `Self::revealing` sorts, so this does
         // not assume one.
-        Ok(Self::revealing(
-            id.anchors().into_iter().chain(handle.anchors()),
-            recv.len(),
-        ))
+        Self::revealing(id.anchors().into_iter().chain(handle.anchors()), recv.len())
     }
 }
 
@@ -760,6 +762,16 @@ mod tests {
                 String::from_utf8_lossy(body)
             );
         }
+    }
+
+    #[test]
+    fn overlapping_reveals_are_refused() {
+        assert_eq!(
+            Layout::revealing([6..9, 0..4, 3..5], 10),
+            Err(LayoutError::OverlappingReveals(0..4, 3..5))
+        );
+        // Touching is not overlapping.
+        assert!(Layout::revealing([0..4, 4..5], 10).is_ok());
     }
 
     #[test]
