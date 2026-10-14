@@ -28,6 +28,9 @@ pub enum LayoutError {
     /// The named request header is absent.
     #[error("the request has no `{0}` header, so the layout has nothing to anchor on")]
     MissingHeader(&'static str),
+    /// The response body's chunked framing cannot be decoded.
+    #[error("the response body cannot be decoded: {0}")]
+    UndecodableBody(String),
     /// The named response member is absent, or split by the raw transcript's chunk framing.
     #[error("the response carries no `{0}` field where the profile expects one")]
     MissingField(String),
@@ -254,6 +257,7 @@ const BEARER_PREFIX: &[u8] = b"\r\nauthorization: Bearer ";
 /// The bearer member in a token response's body, offsets into `recv`.
 /// Refused when empty.
 pub fn token_bearer(recv: &[u8]) -> Result<JsonMember, LayoutError> {
+    decodable(recv)?;
     nonempty(JsonMember::in_response(recv, ACCESS_TOKEN), ACCESS_TOKEN)
 }
 
@@ -288,6 +292,7 @@ impl IdentityMembers {
         recv: &[u8],
         session: &IdentitySession,
     ) -> Result<Self, LayoutError> {
+        decodable(recv)?;
         let (id_field, handle_field) = (session.id_field, session.handle_field);
         let id = match session.id_shape {
             IdShape::JsonString => JsonMember::in_response(recv, id_field),
@@ -298,6 +303,14 @@ impl IdentityMembers {
         let handle = nonempty(JsonMember::in_response(recv, handle_field), handle_field)?;
         Ok(Self { id, handle })
     }
+}
+
+/// Refuse a body whose chunked framing does not decode, so it is not reported
+/// as a missing member.
+fn decodable(recv: &[u8]) -> Result<(), LayoutError> {
+    crate::ranges::extract_response_body(recv)
+        .map(|_| ())
+        .map_err(|e| LayoutError::UndecodableBody(e.to_string()))
 }
 
 /// `found`, unless it is absent or its value is empty.
@@ -856,7 +869,10 @@ mod tests {
 mod tables {
     use super::{
         profiles,
+        token_bearer,
+        IdentityMembers,
         Layout,
+        LayoutError,
     };
 
     /// The ceremony profiles and the identity system name the same platforms.
@@ -912,5 +928,49 @@ mod tables {
             [&b"\"login\": \""[..], b"\"", b"\"id\": ", b","],
             "the anchors carry the whitespace at its offsets"
         );
+    }
+
+    fn github_response(head: &str, body: &str) -> Vec<u8> {
+        format!("HTTP/1.1 200 OK\r\n{head}\r\n\r\n{body}").into_bytes()
+    }
+
+    /// `Transfer-Encoding:chunked`, with no space, is still chunked: a member
+    /// split across chunks is refused, not committed with the framing in it.
+    #[test]
+    fn a_chunked_header_without_a_space_is_still_chunked() {
+        let recv = github_response(
+            "Transfer-Encoding:chunked",
+            "d\r\n{\"login\":\"oct\r\nd\r\nocat\",\"id\":1}\r\n0\r\n\r\n",
+        );
+        assert_eq!(
+            IdentityMembers::in_response(&recv, &profiles::GITHUB.identity.unwrap())
+                .err(),
+            Some(LayoutError::MissingField("login".into()))
+        );
+    }
+
+    /// A nested string `id` before the top-level bare one is passed over.
+    #[test]
+    fn a_nested_string_id_does_not_hide_the_bare_one() {
+        let body = r#"{"plan":{"id":"p"},"login":"octocat","id":583231}"#;
+        let recv = github_response(&format!("content-length: {}", body.len()), body);
+        let members =
+            IdentityMembers::in_response(&recv, &profiles::GITHUB.identity.unwrap())
+                .unwrap();
+        assert_eq!(&recv[members.id.value], b"583231");
+    }
+
+    /// A chunked body that does not decode says so, not that a field is missing.
+    #[test]
+    fn an_undecodable_chunked_body_is_named() {
+        let recv = github_response("Transfer-Encoding: chunked", "zz\r\n{}\r\n0\r\n\r\n");
+        assert!(matches!(
+            IdentityMembers::in_response(&recv, &profiles::GITHUB.identity.unwrap()),
+            Err(LayoutError::UndecodableBody(_))
+        ));
+        assert!(matches!(
+            token_bearer(&recv),
+            Err(LayoutError::UndecodableBody(_))
+        ));
     }
 }

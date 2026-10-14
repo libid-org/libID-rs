@@ -1,8 +1,8 @@
 //! TLS transcript parsing and byte-range helpers for selective disclosure.
 //!
-//! Every helper returns offsets into the raw transcript and fails closed: a
-//! range not contiguous in the raw bytes, such as a member split across a
-//! chunk boundary, yields `None`.
+//! The range helpers return offsets into the raw transcript and fail closed:
+//! a range not contiguous in the raw bytes, such as a member split across a
+//! chunk boundary, is not found.
 
 use std::ops::Range;
 
@@ -11,20 +11,29 @@ use crate::{
     Result,
 };
 
-/// Find the byte range of an HTTP header value in raw TLS data.
+/// Find the byte range of an HTTP header value in raw TLS data: the first
+/// head line whose name matches, case-insensitively, its value without the
+/// spaces and tabs HTTP allows around it (RFC 9112 section 5).
 pub fn find_header_range(data: &[u8], name: &str) -> Option<Range<usize>> {
-    let needle = format!("\r\n{}: ", name);
-    let needle_bytes = needle.as_bytes();
-    let start = data
-        .windows(needle_bytes.len())
-        .position(|w| w.eq_ignore_ascii_case(needle_bytes))?;
-    let value_start = start.checked_add(needle_bytes.len())?;
-    let value_end = data
-        .get(value_start..)?
-        .windows(2)
-        .position(|w| w == b"\r\n")
-        .and_then(|pos| value_start.checked_add(pos))?;
-    Some(value_start..value_end)
+    let head_end = find_first(data, b"\r\n\r\n").unwrap_or(data.len());
+    let mut line_start = find_first(data, b"\r\n")?.checked_add(2)?;
+    while line_start < head_end {
+        let line_end = find_first(&data[line_start..head_end], b"\r\n")
+            .map_or(head_end, |at| line_start + at);
+        let line = &data[line_start..line_end];
+        if let Some(colon) = line.iter().position(|&b| b == b':') {
+            if line[..colon].eq_ignore_ascii_case(name.as_bytes()) {
+                let ows = |b: &u8| *b == b' ' || *b == b'\t';
+                let value = &line[colon + 1..];
+                let lead = value.iter().take_while(|b| ows(b)).count();
+                let trail = value[lead..].iter().rev().take_while(|b| ows(b)).count();
+                let start = line_start + colon + 1 + lead;
+                return Some(start..line_end - trail);
+            }
+        }
+        line_start = line_end.checked_add(2)?;
+    }
+    None
 }
 
 /// Extract an HTTP header value from raw TLS data.
@@ -132,7 +141,8 @@ pub struct JsonMember {
 }
 
 /// A member whose key is present but whose value is not a bare integer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the member is present, but its value is not a bare integer")]
 pub struct NotBareInteger;
 
 impl JsonMember {
@@ -176,21 +186,28 @@ impl JsonMember {
     /// The bare integer member named `field` in `body`: `member` runs through
     /// the `,` or `}` closing the number, `value` is the digits alone.
     /// Reads digits, then the terminator, as `requireFramedInteger` does.
+    /// A key of another shape is passed over, as the quoted scan does.
     fn bare_in_body(body: &[u8], field: &str) -> Option<Self> {
-        let (start, digits) = key_and_value(body, field, false)?;
-        let rest = body.get(digits..)?;
-        // Every digit, a leading zero included: the id rule is not the layout's.
-        let width = rest.iter().take_while(|b| b.is_ascii_digit()).count();
-        let end = digits.checked_add(width)?;
-
-        // The terminator proves the digits are the whole number (REQ-PLAT-51).
-        let term = skip_json_whitespace(body, end);
-        match body.get(term) {
-            Some(b',') | Some(b'}') => Some(Self {
-                member: start..term.checked_add(1)?,
-                value: digits..end,
-            }),
-            _ => None,
+        let mut from = 0;
+        loop {
+            let (key, value) = key_and_value(body.get(from..)?, field, false)?;
+            let (start, digits) = (from.checked_add(key)?, from.checked_add(value)?);
+            // Every digit, a leading zero included: the id rule is not the layout's.
+            let width = body
+                .get(digits..)?
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .count();
+            let end = digits.checked_add(width)?;
+            // The terminator proves the digits are the whole number (REQ-PLAT-51).
+            let term = skip_json_whitespace(body, end);
+            if matches!(body.get(term), Some(b',' | b'}')) {
+                return Some(Self {
+                    member: start..term.checked_add(1)?,
+                    value: digits..end,
+                });
+            }
+            from = start.checked_add(1)?;
         }
     }
 
