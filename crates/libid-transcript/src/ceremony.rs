@@ -8,6 +8,7 @@
 use std::ops::Range;
 
 use crate::ranges::{
+    extract_response_body,
     find_first,
     JsonMember,
     NotBareInteger,
@@ -308,9 +309,12 @@ impl IdentityMembers {
 /// Refuse a body whose chunked framing does not decode, so it is not reported
 /// as a missing member.
 fn decodable(recv: &[u8]) -> Result<(), LayoutError> {
-    crate::ranges::extract_response_body(recv)
-        .map(|_| ())
-        .map_err(|e| LayoutError::UndecodableBody(e.to_string()))
+    extract_response_body(recv).map(|_| ()).map_err(|e| {
+        LayoutError::UndecodableBody(match e {
+            crate::Error::Transcript { detail } => detail,
+            other => other.to_string(),
+        })
+    })
 }
 
 /// `found`, unless it is absent or its value is empty.
@@ -960,14 +964,31 @@ mod tables {
         assert_eq!(&recv[members.id.value], b"583231");
     }
 
+    /// The first bare `id` in document order is the one committed, at any
+    /// depth; GitHub's `/user` puts its own `login` and `id` first.
+    #[test]
+    fn a_nested_bare_id_before_the_top_level_one_is_taken() {
+        let body = r#"{"plan":{"id":7},"login":"octocat","id":583231}"#;
+        let recv = github_response(&format!("content-length: {}", body.len()), body);
+        let members =
+            IdentityMembers::in_response(&recv, &profiles::GITHUB.identity.unwrap())
+                .unwrap();
+        assert_eq!(&recv[members.id.value], b"7");
+    }
+
     /// A chunked body that does not decode says so, not that a field is missing.
     #[test]
     fn an_undecodable_chunked_body_is_named() {
         let recv = github_response("Transfer-Encoding: chunked", "zz\r\n{}\r\n0\r\n\r\n");
-        assert!(matches!(
-            IdentityMembers::in_response(&recv, &profiles::GITHUB.identity.unwrap()),
-            Err(LayoutError::UndecodableBody(_))
-        ));
+        let err =
+            IdentityMembers::in_response(&recv, &profiles::GITHUB.identity.unwrap())
+                .unwrap_err();
+        assert!(matches!(err, LayoutError::UndecodableBody(_)));
+        assert!(
+            err.to_string()
+                .starts_with("the response body cannot be decoded: chunked body: "),
+            "{err}"
+        );
         assert!(matches!(
             token_bearer(&recv),
             Err(LayoutError::UndecodableBody(_))

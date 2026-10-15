@@ -186,7 +186,8 @@ impl JsonMember {
     /// The bare integer member named `field` in `body`: `member` runs through
     /// the `,` or `}` closing the number, `value` is the digits alone.
     /// Reads digits, then the terminator, as `requireFramedInteger` does.
-    /// A key of another shape is passed over, as the quoted scan does.
+    /// A key of another shape is passed over, as the quoted scan does. The
+    /// first bare-shaped member in document order wins, at any nesting depth.
     fn bare_in_body(body: &[u8], field: &str) -> Option<Self> {
         let mut from = 0;
         loop {
@@ -217,7 +218,7 @@ impl JsonMember {
     pub fn bare_in_response(
         recv: &[u8],
         field_name: &str,
-    ) -> core::result::Result<Option<Self>, NotBareInteger> {
+    ) -> Result<Option<Self>, NotBareInteger> {
         if let Some(found) = Self::locate(recv, field_name, Self::bare_in_body) {
             return Ok(Some(found));
         }
@@ -322,6 +323,56 @@ mod tests {
     /// got a short body with no error. The reveal ranges are computed from
     /// that body, so the prover would select them over bytes the server never
     /// sent -- and never learn.
+    fn head(lines: &str) -> Vec<u8> {
+        format!("GET /user HTTP/1.1\r\n{lines}\r\n\r\nAuthorization: body").into_bytes()
+    }
+
+    fn header<'a>(data: &'a [u8], name: &str) -> Option<&'a [u8]> {
+        super::find_header_range(data, name).map(|r| &data[r])
+    }
+
+    #[test]
+    fn a_header_name_matches_in_any_case() {
+        let data = head("authorization: Bearer t");
+        assert_eq!(header(&data, "Authorization"), Some(&b"Bearer t"[..]));
+    }
+
+    #[test]
+    fn a_header_value_drops_the_spaces_and_tabs_around_it() {
+        let data = head("Authorization:\t  Bearer t \t");
+        assert_eq!(header(&data, "authorization"), Some(&b"Bearer t"[..]));
+    }
+
+    #[test]
+    fn a_header_without_a_space_after_its_colon_is_found() {
+        let data = head("Host: x\r\nAuthorization:Bearer t");
+        assert_eq!(header(&data, "Authorization"), Some(&b"Bearer t"[..]));
+    }
+
+    #[test]
+    fn the_first_header_of_a_name_wins() {
+        let data = head("Authorization: first\r\nAuthorization: second");
+        assert_eq!(header(&data, "Authorization"), Some(&b"first"[..]));
+    }
+
+    #[test]
+    fn a_name_that_only_starts_with_the_header_s_does_not_match() {
+        let data = head("Authorization-Extra: x");
+        assert_eq!(header(&data, "Authorization"), None);
+    }
+
+    #[test]
+    fn neither_the_request_line_nor_the_body_is_a_header() {
+        let data = b"Authorization: line\r\nHost: x\r\n\r\nAuthorization: body";
+        assert_eq!(header(data, "Authorization"), None);
+    }
+
+    #[test]
+    fn an_empty_header_value_is_an_empty_range() {
+        let data = head("Authorization: \t");
+        assert_eq!(header(&data, "Authorization"), Some(&b""[..]));
+    }
+
     #[test]
     fn a_malformed_chunk_size_is_an_error_not_a_short_body() {
         let recv = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
