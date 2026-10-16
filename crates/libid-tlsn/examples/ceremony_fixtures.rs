@@ -23,10 +23,7 @@
 //! cargo run -p libid-tlsn --example ceremony_fixtures -- <dir>
 //! ```
 
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::path::PathBuf;
 
 use http_body_util::{
     BodyExt,
@@ -54,6 +51,7 @@ use libid_transcript::{
         token_body,
         Layout,
     },
+    AttestationWire,
 };
 use serde::Serialize;
 use tlsn::{
@@ -291,22 +289,24 @@ fn build(
 }
 
 /// One session as the fixture records it: the response as the wire carried
-/// it, the signed record and the notary's signature over it, each `0x` hex.
+/// it, `0x` hex, and the attestation the notary would hand back.
 #[derive(Serialize)]
 struct SessionJson {
     received: String,
-    attested_data: String,
-    notary_signature: String,
+    #[serde(flatten)]
+    attestation: AttestationJson,
 }
 
 impl SessionJson {
     fn of(held: &Held, sign: &dyn Fn(&[u8; 32]) -> Vec<u8>) -> Self {
-        let attested = held.record.encode().expect("encode");
-        let signature = sign(&keccak256(&attested));
+        let attested_data = held.record.encode().expect("encode");
+        let notary_signature = sign(&keccak256(&attested_data));
         Self {
             received: hex0x(&held.recv),
-            attested_data: hex0x(&attested),
-            notary_signature: hex0x(&signature),
+            attestation: AttestationJson::from(&AttestationWire {
+                attested_data,
+                notary_signature,
+            }),
         }
     }
 }
@@ -316,20 +316,11 @@ impl SessionJson {
 #[derive(Serialize)]
 struct Fixture {
     #[serde(flatten)]
-    submission: serde_json::Value,
+    submission: Submission,
     created_at: u64,
     token: SessionJson,
     identity: SessionJson,
     identity_link_witness: Witness,
-}
-
-impl Fixture {
-    /// Pretty-printed with its keys sorted and a trailing newline.
-    fn write(&self, path: &Path) {
-        let file = serde_json::to_value(self).expect("fixture");
-        let text = serde_json::to_string_pretty(&file).expect("fixture") + "\n";
-        std::fs::write(path, text).expect("write");
-    }
 }
 
 #[tokio::main]
@@ -343,7 +334,7 @@ async fn main() {
     let notary = hex0x(&pubkey_to_eth_address(key.verifying_key()));
     let sign = |digest: &[u8; 32]| sign_eth_claim(&key, digest).expect("sign");
     let verifier = code_verifier();
-    let submission = submission_json(&notary);
+    let submission = Submission::of(&notary);
 
     // ── X: the browser's two sessions ────────────────────────────────
     let x = profiles::X;
@@ -422,16 +413,18 @@ async fn main() {
             .expect("x identity response layout"),
         "api.x.com",
     );
-    Fixture {
-        submission: submission.clone(),
-        created_at: T0,
-        token: SessionJson::of(&token, &sign),
-        identity: SessionJson::of(&identity, &sign),
-        // For the circuit's tests.
-        identity_link_witness: Witness::of(&x, &token, &identity)
-            .expect("x identity-link witness"),
-    }
-    .write(&out.join("x-ceremony-session.json"));
+    write_sorted(
+        &out.join("x-ceremony-session.json"),
+        &Fixture {
+            submission: submission.clone(),
+            created_at: T0,
+            token: SessionJson::of(&token, &sign),
+            identity: SessionJson::of(&identity, &sign),
+            // For the circuit's tests.
+            identity_link_witness: Witness::of(&x, &token, &identity)
+                .expect("x identity-link witness"),
+        },
+    );
 
     // ── GitHub: the token exchange, the browser's identity read ──────
     let github = profiles::GITHUB;
@@ -517,14 +510,16 @@ async fn main() {
             .expect("github identity response layout"),
         "api.github.com",
     );
-    Fixture {
-        submission,
-        created_at: T0,
-        token: SessionJson::of(&token, &sign),
-        identity: SessionJson::of(&identity, &sign),
-        identity_link_witness: Witness::of(&github, &token, &identity)
-            .expect("github identity-link witness"),
-    }
-    .write(&out.join("github-ceremony-session.json"));
+    write_sorted(
+        &out.join("github-ceremony-session.json"),
+        &Fixture {
+            submission,
+            created_at: T0,
+            token: SessionJson::of(&token, &sign),
+            identity: SessionJson::of(&identity, &sign),
+            identity_link_witness: Witness::of(&github, &token, &identity)
+                .expect("github identity-link witness"),
+        },
+    );
     println!("wrote {}", out.display());
 }

@@ -7,7 +7,11 @@
 
 #![allow(dead_code)]
 
+use std::path::Path;
+
 use libid_crypto::keccak256;
+use libid_transcript::AttestationWire;
+use serde::Serialize;
 use sha2::Digest as _;
 
 /// anvil #0, the key the contract suites trust.
@@ -82,16 +86,55 @@ pub fn hex0x(bytes: &[u8]) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
-/// The JSON every fixture starts with: which submission the records are
-/// bound to, and who signed them.
-pub fn submission_json(notary: &str) -> serde_json::Value {
-    serde_json::json!({
-        "ceremony_version": CEREMONY_VERSION,
-        "chain_id": CHAIN_ID,
-        "notary": notary,
-        "operation_domain": hex0x(&keccak256(OPERATION_DOMAIN)),
-        "authorization_nonce": hex0x(&AUTHORIZATION_NONCE),
-        "transaction_data": hex0x(&transaction_data()),
-        "authorization_digest": hex0x(&authorization_digest()),
-    })
+/// What every fixture starts with: which submission the records are bound
+/// to, and who signed them.
+#[derive(Clone, Serialize)]
+pub struct Submission {
+    pub ceremony_version: u16,
+    pub chain_id: u64,
+    pub notary: String,
+    pub operation_domain: String,
+    pub authorization_nonce: String,
+    pub transaction_data: String,
+    pub authorization_digest: String,
+}
+
+impl Submission {
+    /// The suites' submission, signed by `notary`.
+    pub fn of(notary: &str) -> Self {
+        Self {
+            ceremony_version: CEREMONY_VERSION,
+            chain_id: CHAIN_ID,
+            notary: notary.into(),
+            operation_domain: hex0x(&keccak256(OPERATION_DOMAIN)),
+            authorization_nonce: hex0x(&AUTHORIZATION_NONCE),
+            transaction_data: hex0x(&transaction_data()),
+            authorization_digest: hex0x(&authorization_digest()),
+        }
+    }
+}
+
+/// An attestation as the fixtures carry it: [`AttestationWire`]'s two byte
+/// strings as `0x` hex, which `vm.parseJsonBytes` reads.
+#[derive(Serialize)]
+pub struct AttestationJson {
+    pub attested_data: String,
+    pub notary_signature: String,
+}
+
+impl From<&AttestationWire> for AttestationJson {
+    fn from(attestation: &AttestationWire) -> Self {
+        Self {
+            attested_data: hex0x(&attestation.attested_data),
+            notary_signature: hex0x(&attestation.notary_signature),
+        }
+    }
+}
+
+/// Write `file` to `path` pretty-printed, its keys sorted, with a trailing
+/// newline: the layout the committed fixtures have.
+pub fn write_sorted(path: &Path, file: &impl Serialize) {
+    let sorted = serde_json::to_value(file).expect("json");
+    let text = serde_json::to_string_pretty(&sorted).expect("json") + "\n";
+    std::fs::write(path, text).expect("write");
 }
