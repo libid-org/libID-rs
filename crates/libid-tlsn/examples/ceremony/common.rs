@@ -84,9 +84,8 @@ pub fn hex0x(bytes: &[u8]) -> String {
 
 /// The JSON every fixture starts with: which submission the records are
 /// bound to, and who signed them.
-pub fn submission_json(platform: &str, notary: &str) -> serde_json::Value {
+pub fn submission_json(notary: &str) -> serde_json::Value {
     serde_json::json!({
-        "platform": platform,
         "ceremony_version": CEREMONY_VERSION,
         "chain_id": CHAIN_ID,
         "notary": notary,
@@ -94,6 +93,5 @@ pub fn submission_json(platform: &str, notary: &str) -> serde_json::Value {
         "authorization_nonce": hex0x(&AUTHORIZATION_NONCE),
         "transaction_data": hex0x(&transaction_data()),
         "authorization_digest": hex0x(&authorization_digest()),
-        "code_verifier": code_verifier(),
     })
 }

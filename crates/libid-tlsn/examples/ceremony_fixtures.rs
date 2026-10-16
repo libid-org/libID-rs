@@ -23,7 +23,10 @@
 //! cargo run -p libid-tlsn --example ceremony_fixtures -- <dir>
 //! ```
 
-use std::path::PathBuf;
+use std::path::{
+    Path,
+    PathBuf,
+};
 
 use http_body_util::{
     BodyExt,
@@ -52,7 +55,7 @@ use libid_transcript::{
         Layout,
     },
 };
-use serde_json::json;
+use serde::Serialize;
 use tlsn::{
     config::prove::ProveConfig,
     hash::{
@@ -188,20 +191,6 @@ fn blinder(session: &str, index: usize) -> [u8; 16] {
     seed[..16].try_into().expect("16 bytes")
 }
 
-/// The openings as the fixture lists them.
-fn openings_json(openings: &[CommitmentOpening]) -> Vec<serde_json::Value> {
-    openings
-        .iter()
-        .map(|opening| {
-            json!({
-                "direction": opening.direction.to_string(),
-                "ranges": opening.ranges.iter().map(|r| json!([r.start, r.end])).collect::<Vec<_>>(),
-                "blinder": hex0x(&opening.blinder),
-            })
-        })
-        .collect()
-}
-
 /// `prover_generic`'s reveal and commit configuration, then the verifier's
 /// record construction, with tlsn's own commitment hashes in between.
 fn build(
@@ -301,21 +290,46 @@ fn build(
     }
 }
 
-fn session_json(
-    endpoint: &str,
-    held: &Held,
-    sign: &dyn Fn(&[u8; 32]) -> Vec<u8>,
-) -> serde_json::Value {
-    let attested = held.record.encode().expect("encode");
-    let signature = sign(&keccak256(&attested));
-    json!({
-        "endpoint": endpoint,
-        "sent": hex0x(&held.sent),
-        "received": hex0x(&held.recv),
-        "attested_data": hex0x(&attested),
-        "notary_signature": hex0x(&signature),
-        "openings": openings_json(&held.openings),
-    })
+/// One session as the fixture records it: the response as the wire carried
+/// it, the signed record and the notary's signature over it, each `0x` hex.
+#[derive(Serialize)]
+struct SessionJson {
+    received: String,
+    attested_data: String,
+    notary_signature: String,
+}
+
+impl SessionJson {
+    fn of(held: &Held, sign: &dyn Fn(&[u8; 32]) -> Vec<u8>) -> Self {
+        let attested = held.record.encode().expect("encode");
+        let signature = sign(&keccak256(&attested));
+        Self {
+            received: hex0x(&held.recv),
+            attested_data: hex0x(&attested),
+            notary_signature: hex0x(&signature),
+        }
+    }
+}
+
+/// One platform's fixture: the submission its records bind to, the clock the
+/// contract suites warp to, both records and the identity-link witness.
+#[derive(Serialize)]
+struct Fixture {
+    #[serde(flatten)]
+    submission: serde_json::Value,
+    created_at: u64,
+    token: SessionJson,
+    identity: SessionJson,
+    identity_link_witness: Witness,
+}
+
+impl Fixture {
+    /// Pretty-printed with its keys sorted and a trailing newline.
+    fn write(&self, path: &Path) {
+        let file = serde_json::to_value(self).expect("fixture");
+        let text = serde_json::to_string_pretty(&file).expect("fixture") + "\n";
+        std::fs::write(path, text).expect("write");
+    }
 }
 
 #[tokio::main]
@@ -329,15 +343,7 @@ async fn main() {
     let notary = hex0x(&pubkey_to_eth_address(key.verifying_key()));
     let sign = |digest: &[u8; 32]| sign_eth_claim(&key, digest).expect("sign");
     let verifier = code_verifier();
-
-    let common = |platform: &str| {
-        let mut file = submission_json(platform, &notary);
-        file["generator"] = serde_json::json!(
-            "libid-rs: cargo run -p libid-tlsn --example ceremony_fixtures -- <dir>"
-        );
-        file["created_at"] = serde_json::json!(T0);
-        file
-    };
+    let submission = submission_json(&notary);
 
     // ── X: the browser's two sessions ────────────────────────────────
     let x = profiles::X;
@@ -383,7 +389,6 @@ async fn main() {
         &Layout::token_response(&recv).expect("x token response layout"),
         "api.x.com",
     );
-    let x_token = session_json("https://api.x.com/2/oauth2/token", &token, &sign);
 
     let recv = answer(
         "application/json;charset=utf-8",
@@ -417,21 +422,16 @@ async fn main() {
             .expect("x identity response layout"),
         "api.x.com",
     );
-    let x_identity = session_json("https://api.x.com/2/users/me", &identity, &sign);
-
-    let mut file = common("x");
-    file["token"] = x_token;
-    file["identity"] = x_identity;
-    // For the circuit's tests.
-    file["identity_link_witness"] = serde_json::to_value(
-        Witness::of(&x, &token, &identity).expect("x identity-link witness"),
-    )
-    .unwrap();
-    std::fs::write(
-        out.join("x-ceremony-session.json"),
-        serde_json::to_string_pretty(&file).unwrap() + "\n",
-    )
-    .expect("write");
+    Fixture {
+        submission: submission.clone(),
+        created_at: T0,
+        token: SessionJson::of(&token, &sign),
+        identity: SessionJson::of(&identity, &sign),
+        // For the circuit's tests.
+        identity_link_witness: Witness::of(&x, &token, &identity)
+            .expect("x identity-link witness"),
+    }
+    .write(&out.join("x-ceremony-session.json"));
 
     // ── GitHub: the token exchange, the browser's identity read ──────
     let github = profiles::GITHUB;
@@ -477,8 +477,6 @@ async fn main() {
         &Layout::token_response(&recv).expect("github token response layout"),
         "github.com",
     );
-    let github_token =
-        session_json("https://github.com/login/oauth/access_token", &token, &sign);
 
     // As GitHub serves `/user` for the media type the profile pins: pretty
     // printed, a newline and two spaces before every member and a space after
@@ -519,19 +517,14 @@ async fn main() {
             .expect("github identity response layout"),
         "api.github.com",
     );
-    let github_identity = session_json("https://api.github.com/user", &identity, &sign);
-
-    let mut file = common("github");
-    file["token"] = github_token;
-    file["identity"] = github_identity;
-    file["identity_link_witness"] = serde_json::to_value(
-        Witness::of(&github, &token, &identity).expect("github identity-link witness"),
-    )
-    .unwrap();
-    std::fs::write(
-        out.join("github-ceremony-session.json"),
-        serde_json::to_string_pretty(&file).unwrap() + "\n",
-    )
-    .expect("write");
+    Fixture {
+        submission,
+        created_at: T0,
+        token: SessionJson::of(&token, &sign),
+        identity: SessionJson::of(&identity, &sign),
+        identity_link_witness: Witness::of(&github, &token, &identity)
+            .expect("github identity-link witness"),
+    }
+    .write(&out.join("github-ceremony-session.json"));
     println!("wrote {}", out.display());
 }
