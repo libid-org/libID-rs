@@ -14,7 +14,7 @@ use crate::{
 /// Find the byte range of an HTTP header value in raw TLS data: the first
 /// head line whose name matches, case-insensitively, its value without the
 /// spaces and tabs HTTP allows around it (RFC 9112 section 5).
-pub fn find_header_range(data: &[u8], name: &str) -> Option<Range<usize>> {
+fn find_header_range(data: &[u8], name: &str) -> Option<Range<usize>> {
     let head_end = find_first(data, b"\r\n\r\n").unwrap_or(data.len());
     let mut line_start = find_first(data, b"\r\n")?.checked_add(2)?;
     while line_start < head_end {
@@ -37,22 +37,13 @@ pub fn find_header_range(data: &[u8], name: &str) -> Option<Range<usize>> {
 }
 
 /// Extract an HTTP header value from raw TLS data.
-pub fn extract_header(data: &[u8], name: &str) -> Option<String> {
+fn extract_header(data: &[u8], name: &str) -> Option<String> {
     find_header_range(data, name)
         .map(|range| String::from_utf8_lossy(&data[range]).to_string())
 }
 
-/// Find the byte range of the HTTP request line in sent data.
-pub fn find_request_line_range(sent: &[u8]) -> Range<usize> {
-    let end = sent
-        .windows(2)
-        .position(|w| w == b"\r\n")
-        .unwrap_or(sent.len());
-    0..end
-}
-
 /// Find the byte range of the HTTP response body in received data.
-pub fn find_response_body_range(recv: &[u8]) -> Option<Range<usize>> {
+fn find_response_body_range(recv: &[u8]) -> Option<Range<usize>> {
     let marker = b"\r\n\r\n";
     recv.windows(marker.len())
         .position(|w| w == marker)
@@ -63,7 +54,7 @@ pub fn find_response_body_range(recv: &[u8]) -> Option<Range<usize>> {
 /// Extract and decode the HTTP response body from received TLS data.
 ///
 /// Handles both chunked and non-chunked transfer encodings.
-pub fn extract_response_body(recv: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn extract_response_body(recv: &[u8]) -> Result<Vec<u8>> {
     let range = find_response_body_range(recv).ok_or_else(|| Error::Transcript {
         detail: "no response body found".into(),
     })?;
@@ -141,9 +132,8 @@ pub struct JsonMember {
 }
 
 /// A member whose key is present but whose value is not a bare integer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("the member is present, but its value is not a bare integer")]
-pub struct NotBareInteger;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NotBareInteger;
 
 impl JsonMember {
     /// The first member named `field` in `body`, offsets into `body`.
@@ -171,7 +161,7 @@ impl JsonMember {
 
     /// The member named `field_name` in an HTTP response's body, offsets into
     /// the raw `recv` transcript.
-    pub fn in_response(recv: &[u8], field_name: &str) -> Option<Self> {
+    pub(crate) fn in_response(recv: &[u8], field_name: &str) -> Option<Self> {
         Self::locate(recv, field_name, Self::in_body)
     }
 
@@ -215,7 +205,7 @@ impl JsonMember {
     /// The bare integer member named `field_name` in an HTTP response's body,
     /// offsets into the raw `recv` transcript. `Err` when the decoded body has
     /// the key but its value is not digits closed by `,` or `}`.
-    pub fn bare_in_response(
+    pub(crate) fn bare_in_response(
         recv: &[u8],
         field_name: &str,
     ) -> Result<Option<Self>, NotBareInteger> {

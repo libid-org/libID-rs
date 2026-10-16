@@ -5,16 +5,16 @@
 //! crates.io while the `tlsn` dependency itself is git-only. The session
 //! driver that produces these transcripts lives in `libid-tlsn`.
 //!
-//! * [`ranges`] — HTTP/JSON byte-range math for selective disclosure: locate
-//!   headers, response bodies (chunked or not), and JSON member ranges
-//!   in a raw TLS transcript, and map them back to absolute transcript
-//!   offsets, which are what a reveal range and a commitment are stated in.
+//! * [`ceremony`] — what each session of a ceremony reveals and commits, and
+//!   the locators of the committed values as [`JsonMember`] offsets into the
+//!   raw transcript, which are what a reveal range and a commitment are
+//!   stated in.
 //! * [`wire`] — the length-prefixed JSON protocol the notary and prover speak
 //!   over the recovered socket after MPC-TLS closes.
 
 pub mod attestation;
 pub mod ceremony;
-pub mod ranges;
+mod ranges;
 pub mod wire;
 
 pub use attestation::{
@@ -24,15 +24,7 @@ pub use attestation::{
     RevealedRange,
 };
 
-pub use ranges::{
-    extract_header,
-    extract_response_body,
-    find_header_range,
-    find_request_line_range,
-    find_response_body_range,
-    JsonMember,
-    NotBareInteger,
-};
+pub use ranges::JsonMember;
 pub use wire::{
     read_msg,
     write_msg,

@@ -7,11 +7,14 @@
 
 use std::ops::Range;
 
-use crate::ranges::{
-    extract_response_body,
-    find_first,
-    JsonMember,
-    NotBareInteger,
+use crate::{
+    ranges::{
+        extract_response_body,
+        find_first,
+        JsonMember,
+        NotBareInteger,
+    },
+    Error,
 };
 
 /// What one direction of one session discloses.
@@ -68,7 +71,7 @@ pub enum TokenBodyError {
 
 /// The value of `grant_type` on every token request: RFC 6749 section 4.1.3
 /// fixes it, so no profile and no caller chooses it.
-pub const AUTHORIZATION_CODE_GRANT: &str = "authorization_code";
+const AUTHORIZATION_CODE_GRANT: &str = "authorization_code";
 
 /// One value as the `application/x-www-form-urlencoded` serializer spells it
 /// (WHATWG URL, section 5.2): `[A-Za-z0-9*._-]` as they are, a space as `+`,
@@ -98,7 +101,7 @@ pub fn form_encode(value: &str) -> String {
 /// form-encoded, `&` between pairs and nothing after the last.
 ///
 /// `values` holds each field's value by name, decoded, and `grant_type` is
-/// always [`AUTHORIZATION_CODE_GRANT`]. The two lists must agree: a name the
+/// always `authorization_code`. The two lists must agree: a name the
 /// profile lists and `values` lacks is an error rather than a field left out,
 /// because the verifier compares the field list whole and a body missing one
 /// verifies nowhere; a name `values` carries and the profile does not list --
@@ -311,7 +314,7 @@ impl IdentityMembers {
 fn decodable(recv: &[u8]) -> Result<(), LayoutError> {
     extract_response_body(recv).map(|_| ()).map_err(|e| {
         LayoutError::UndecodableBody(match e {
-            crate::Error::Transcript { detail } => detail,
+            Error::Transcript { detail } => detail,
             other => other.to_string(),
         })
     })
