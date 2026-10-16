@@ -71,8 +71,12 @@ use libid_transcript::{
         token_body,
         Layout,
     },
+    AttestationWire,
 };
-use serde_json::json;
+use serde::{
+    Deserialize,
+    Serialize,
+};
 use tlsn::connection::ServerName;
 use tokio::{
     io::{
@@ -215,11 +219,9 @@ async fn receive_code(listen: &str, expected_state: &str) -> String {
 }
 
 struct Session {
-    record: Vec<u8>,
-    signature: Vec<u8>,
+    attestation: AttestationWire,
     created_at: u64,
     response_body: Vec<u8>,
-    authority: String,
 }
 
 /// One notarized session: the prover against the real platform, the
@@ -271,22 +273,23 @@ async fn notarize(
         created_at,
     })
     .expect("record");
-    let record = data.encode().expect("encode");
-    let signature = sign(&keccak256(&record));
+    let attested_data = data.encode().expect("encode");
+    let notary_signature = sign(&keccak256(&attested_data));
     eprintln!(
         "  record: {} bytes, sent {} revealed / {} committed, received {} revealed / {} committed, authority {authority}",
-        record.len(),
+        attested_data.len(),
         data.sent.revealed.len(),
         data.sent.commitments.len(),
         data.received.revealed.len(),
         data.received.commitments.len()
     );
     Ok(Session {
-        record,
-        signature,
+        attestation: AttestationWire {
+            attested_data,
+            notary_signature,
+        },
         created_at,
         response_body: prover.response_body,
-        authority,
     })
 }
 
@@ -295,14 +298,45 @@ fn fail(message: String) -> ! {
     std::process::exit(1)
 }
 
-fn session_json(endpoint: &str, session: &Session) -> serde_json::Value {
-    json!({
-        "endpoint": endpoint,
-        "authority": session.authority,
-        "created_at": session.created_at,
-        "attested_data": hex0x(&session.record),
-        "notary_signature": hex0x(&session.signature),
-    })
+/// One session as the capture records it: the notary's clock and the
+/// attestation it handed back.
+#[derive(Serialize)]
+struct CaptureSession {
+    created_at: u64,
+    #[serde(flatten)]
+    attestation: AttestationJson,
+}
+
+impl CaptureSession {
+    fn of(session: &Session) -> Self {
+        Self {
+            created_at: session.created_at,
+            attestation: AttestationJson::from(&session.attestation),
+        }
+    }
+}
+
+/// One platform's capture: the submission its records bind to, and both
+/// records.
+#[derive(Serialize)]
+struct Capture {
+    #[serde(flatten)]
+    submission: Submission,
+    token: CaptureSession,
+    identity: CaptureSession,
+}
+
+/// The token response, as far as the identity session needs it. The bearer
+/// is committed in both records and never written.
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+}
+
+impl TokenResponse {
+    fn of(body: &[u8]) -> Self {
+        serde_json::from_slice(body).expect("the token response carries a bearer")
+    }
 }
 
 fn request(
@@ -385,7 +419,7 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
-            let bearer = bearer_of(&token.response_body);
+            let bearer = TokenResponse::of(&token.response_body).access_token;
             eprintln!("token received; running the identity session");
             let identity = notarize(
                 request(
@@ -409,10 +443,7 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
-            (
-                session_json("https://api.x.com/2/oauth2/token", &token),
-                session_json("https://api.x.com/2/users/me", &identity),
-            )
+            (CaptureSession::of(&token), CaptureSession::of(&identity))
         }
         _ => {
             let profile = profiles::GITHUB;
@@ -452,7 +483,7 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
-            let bearer = bearer_of(&token.response_body);
+            let bearer = TokenResponse::of(&token.response_body).access_token;
             eprintln!("token received; running the identity session");
             // As the browser's `identityRequest` sets them.
             let identity = notarize(
@@ -479,33 +510,20 @@ async fn main() {
             )
             .await
             .unwrap_or_else(|e| fail(e));
-            (
-                session_json("https://github.com/login/oauth/access_token", &token),
-                session_json("https://api.github.com/user", &identity),
-            )
+            (CaptureSession::of(&token), CaptureSession::of(&identity))
         }
     };
 
-    let mut file = submission_json(&notary);
-    file["source"] = json!("captured: a real MPC-TLS session against the platform, the verifier in-process, by libid-rs examples/capture_ceremony.rs");
-    file["captured_at"] = json!(now());
-    file["token"] = token;
-    file["identity"] = identity;
     let path = args
         .out
         .join(format!("{}-ceremony-real.json", args.platform));
-    std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap() + "\n")
-        .expect("write");
+    write_sorted(
+        &path,
+        &Capture {
+            submission: Submission::of(&notary),
+            token,
+            identity,
+        },
+    );
     println!("wrote {}", path.display());
-}
-
-/// The bearer out of the token response, which the identity session needs
-/// and nothing else sees: it is committed in both records and not written.
-fn bearer_of(body: &[u8]) -> String {
-    let json: serde_json::Value =
-        serde_json::from_slice(body).expect("the token response is JSON");
-    json["access_token"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no access_token in the token response: {json}"))
-        .to_owned()
 }
