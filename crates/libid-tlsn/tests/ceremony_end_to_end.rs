@@ -33,14 +33,13 @@ use libid_transcript::{
 use rangeset::set::RangeSet;
 use tlsn::{
     hash::{
-        Blinder,
+        HashAlgId,
+        HashAlgorithm,
         Sha256,
+        TypedHash,
     },
     transcript::{
-        hash::{
-            hash_plaintext,
-            PlaintextHash,
-        },
+        hash::PlaintextHash,
         Direction,
         Transcript,
         TranscriptCommitment,
@@ -71,16 +70,13 @@ const GITHUB_TOKEN_RECV: &[u8] =
 const GITHUB_ID_SENT: &[u8] = b"GET /user HTTP/1.1\r\nhost: api.github.com\r\nauthorization: Bearer gho_SECRETBEARER\r\nconnection: close\r\n\r\n";
 const GITHUB_ID_RECV: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\n  \"login\": \"OctoCat\",\n  \"id\": 583231 ,\n  \"node_id\": \"MDQ6VXNlcjU4MzIzMQ==\",\n  \"plan\": \"pro\"\n}";
 
-/// A distinct, fixed tlsn blinder per commitment, so the records reproduce.
-fn blinder(direction: Direction, index: usize) -> Blinder {
+/// A distinct, fixed blinder per commitment, so the records reproduce.
+fn blinder(direction: Direction, index: usize) -> [u8; 16] {
     let tag = match direction {
         Direction::Sent => 0x50,
         Direction::Received => 0xA0,
     };
-    let bytes: Vec<u8> = (0..16u8)
-        .map(|i| tag ^ (index as u8) ^ i.wrapping_mul(17))
-        .collect();
-    serde_json::from_value(serde_json::json!(bytes)).expect("a 16-byte blinder")
+    std::array::from_fn(|i| tag ^ (index as u8) ^ (i as u8).wrapping_mul(17))
 }
 
 /// A pair of layouts as the session MPC would leave: the transcript, the
@@ -111,12 +107,15 @@ fn record(
             commitments.push(TranscriptCommitment::Hash(PlaintextHash {
                 direction,
                 idx: RangeSet::from(c.clone()),
-                hash: hash_plaintext(&hasher, &bytes[c.clone()], &blinder),
+                hash: TypedHash {
+                    alg: HashAlgId::SHA256,
+                    value: hasher.hash_prefixed(&bytes[c.clone()], &blinder),
+                },
             }));
             openings.push(CommitmentOpening {
                 direction,
                 ranges: vec![c.clone()],
-                blinder: blinder.as_bytes().to_vec(),
+                blinder: blinder.to_vec(),
             });
         }
     }
