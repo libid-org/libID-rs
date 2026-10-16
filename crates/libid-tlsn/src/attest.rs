@@ -284,9 +284,12 @@ mod tests {
     }
 
     use super::*;
-    use libid_transcript::ceremony::{
-        profiles,
-        Layout,
+    use libid_transcript::{
+        attestation::HEADER_LEN,
+        ceremony::{
+            profiles,
+            Layout,
+        },
     };
     use rangeset::set::RangeSet;
     use tlsn::{
@@ -368,7 +371,7 @@ mod tests {
         // the client's. What stays checkable on this side is that every byte
         // the fields describe is present, which is the property the layout
         // gives the forward-parsing decoder something to walk.
-        let mut want = libid_transcript::attestation::HEADER_LEN;
+        let mut want = HEADER_LEN;
         for d in [&data.sent, &data.received] {
             want += 8 + 8; // one eight-byte count per list
             for r in &d.revealed {
@@ -556,10 +559,7 @@ mod tests {
                 .to_partial(sent_revealed.clone(), RangeSet::from(0..recv.len()));
             let data =
                 AttestedData::from_observed(observed(&partial, &commitments)).unwrap();
-            headers.push(
-                data.encode().unwrap()[..libid_transcript::attestation::HEADER_LEN]
-                    .to_vec(),
-            );
+            headers.push(data.encode().unwrap()[..HEADER_LEN].to_vec());
         }
         assert_eq!(
             headers[0], headers[1],

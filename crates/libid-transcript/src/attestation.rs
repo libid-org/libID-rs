@@ -75,6 +75,7 @@ pub struct AttestedData {
 
 /// Bytes before the first direction block: the authority, `createdAt`, and the
 /// two transcript lengths.
+#[cfg(any(test, feature = "test-helpers"))]
 pub const HEADER_LEN: usize = 32 + 8 + 4 + 4;
 
 /// Big-endian, fixed-width, no varints: the decoder is Solidity, which has no
@@ -156,6 +157,7 @@ impl AttestedData {
 
     /// What the notary signs, and the only preimage it ever signs
     /// (REQ-COMMON-33).
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn digest(&self) -> Result<[u8; 32], bincode::error::EncodeError> {
         Ok(keccak256(&self.encode()?))
     }

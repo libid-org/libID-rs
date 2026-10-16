@@ -59,6 +59,7 @@ pub enum LayoutError {
 }
 
 /// Why a token body could not be serialized from a profile's field list.
+#[cfg(any(test, feature = "test-helpers"))]
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TokenBodyError {
     #[error("the profile's body names `{0}`, which the caller has no value for")]
@@ -71,6 +72,7 @@ pub enum TokenBodyError {
 
 /// The value of `grant_type` on every token request: RFC 6749 section 4.1.3
 /// fixes it, so no profile and no caller chooses it.
+#[cfg(any(test, feature = "test-helpers"))]
 const AUTHORIZATION_CODE_GRANT: &str = "authorization_code";
 
 /// One value as the `application/x-www-form-urlencoded` serializer spells it
@@ -82,6 +84,7 @@ const AUTHORIZATION_CODE_GRANT: &str = "authorization_code";
 /// and one built there are the same bytes. It is NOT RFC 3986's unreserved
 /// set: `~` is escaped and `*` is not, and a body spelled the other way is a
 /// body the verifier refuses.
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn form_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for b in value.bytes() {
@@ -108,6 +111,7 @@ pub fn form_encode(value: &str) -> String {
 /// or `grant_type`, which no caller chooses -- is an error rather than a
 /// value dropped, because a caller that named it meant it to be sent. An
 /// empty value is refused for the first reason.
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn token_body(
     session: &TokenSession,
     values: &[(&str, &str)],
