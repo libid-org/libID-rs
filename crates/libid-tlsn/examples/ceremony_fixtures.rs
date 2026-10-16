@@ -80,8 +80,8 @@ mod common;
 mod witness;
 use common::*;
 use witness::{
-    identity_link_witness,
     Held,
+    Witness,
 };
 
 /// The clock the contract suites warp to.
@@ -424,7 +424,7 @@ async fn main() {
     file["identity"] = x_identity;
     // For the circuit's tests.
     file["identity_link_witness"] = serde_json::to_value(
-        identity_link_witness(&x, &token, &identity).expect("x identity-link witness"),
+        Witness::of(&x, &token, &identity).expect("x identity-link witness"),
     )
     .unwrap();
     std::fs::write(
@@ -525,8 +525,7 @@ async fn main() {
     file["token"] = github_token;
     file["identity"] = github_identity;
     file["identity_link_witness"] = serde_json::to_value(
-        identity_link_witness(&github, &token, &identity)
-            .expect("github identity-link witness"),
+        Witness::of(&github, &token, &identity).expect("github identity-link witness"),
     )
     .unwrap();
     std::fs::write(
