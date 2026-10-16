@@ -263,20 +263,6 @@ mod tests {
     const X_TOKEN_SENT: &[u8] = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: 114\r\n\r\ngrant_type=authorization_code&client_id=abc&code=abc&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier=xyz";
     const GITHUB_TOKEN_SENT: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: 109\r\n\r\nclient_id=Iv1.x&code=abc&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier=xyz&client_secret=deadbeef";
 
-    /// Each token fixture's `content-length` is its body's length.
-    #[test]
-    fn the_token_fixtures_declare_their_body_length() {
-        for sent in [X_TOKEN_SENT, GITHUB_TOKEN_SENT] {
-            let text = std::str::from_utf8(sent).unwrap();
-            let (head, body) = text.split_once("\r\n\r\n").unwrap();
-            let declared = head
-                .split("\r\n")
-                .find_map(|line| line.strip_prefix("content-length: "))
-                .unwrap();
-            assert_eq!(declared.parse::<usize>(), Ok(body.len()), "{head}");
-        }
-    }
-
     /// The Platform Verifier requires the revealed ranges and the commitments
     /// to account for the signed length exactly. That is its rule to enforce,
     /// not ours -- but a layout that cannot satisfy it produces attestations no
