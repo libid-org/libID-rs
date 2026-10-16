@@ -486,7 +486,7 @@ async fn main() {
         }
     };
 
-    let mut file = submission_json(&args.platform, &notary);
+    let mut file = submission_json(&notary);
     file["source"] = json!("captured: a real MPC-TLS session against the platform, the verifier in-process, by libid-rs examples/capture_ceremony.rs");
     file["captured_at"] = json!(now());
     file["token"] = token;
