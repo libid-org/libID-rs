@@ -47,7 +47,6 @@ use tlsn::{
     },
 };
 use witness::{
-    identity_link_witness,
     Held,
     Witness,
 };
@@ -470,8 +469,8 @@ fn assert_the_witness_opens_the_record(
     token: &Held,
     identity: &Held,
 ) {
-    let witness = identity_link_witness(profile, token, identity)
-        .expect("the witness opens the record");
+    let witness =
+        Witness::of(profile, token, identity).expect("the witness opens the record");
     assert_eq!(witness.platform, profile.platform);
     let json = serde_json::to_value(&witness).unwrap();
     assert_eq!(serde_json::from_value::<Witness>(json).unwrap(), witness);
