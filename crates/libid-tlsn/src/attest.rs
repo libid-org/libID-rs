@@ -382,6 +382,26 @@ mod tests {
         assert_tiles(&data.sent, data.sent_transcript_length);
     }
 
+    #[test]
+    fn each_revealed_range_carries_its_own_bytes() {
+        // The bytes come off one stream across every revealed range of a
+        // direction, so a range that took too few or too many would shift the
+        // ranges after it.
+        let (partial, commitments) = session();
+        let data = AttestedData::from_observed(observed(&partial, &commitments)).unwrap();
+        assert_eq!(
+            data.sent.revealed.len(),
+            2,
+            "the fixture reveals around the bearer"
+        );
+        for (block, plaintext) in [(&data.sent, SENT), (&data.received, RECV)] {
+            for range in &block.revealed {
+                let start = range.start as usize;
+                assert_eq!(range.bytes, &plaintext[start..start + range.bytes.len()]);
+            }
+        }
+    }
+
     /// The fixture's own offsets, which nothing else here reads.
     ///
     /// Every other test built on `session()` asserts tiling, the signed
