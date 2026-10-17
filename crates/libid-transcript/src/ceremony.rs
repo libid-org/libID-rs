@@ -886,31 +886,22 @@ mod tables {
         LayoutError,
     };
 
-    /// The ceremony profiles and the identity system name the same platforms.
+    /// The ceremony profiles and the identity platform table name the same
+    /// platforms.
     ///
-    /// Two generated tables, deliberately: one says how a handle normalizes,
-    /// the other says what a session notarizes, and neither belongs inside the
-    /// other. libid-contracts keeps them apart the same way and asserts they
-    /// agree (`PlatformIdentity.t.sol::test_theTwoTablesAgree`), because a name
-    /// bound through one path and read through the other is two keyspaces for
-    /// one platform with nothing to make the divergence loud.
-    ///
-    /// Both crates are generated from libid-contracts, so this is not checking
-    /// our transcription -- it is checking that a consumer holding BOTH at
-    /// versions it chose independently holds one keyspace. They are separate
-    /// crates with separate version requirements, and a lockfile can pin a pair
-    /// that never shipped together.
+    /// A platform named differently in the two is two keyspaces for one
+    /// platform. Both crates come from libid-contracts, but under separate
+    /// version requirements a lockfile can pin a pair that never shipped
+    /// together.
     #[test]
     fn the_two_tables_name_the_same_platforms() {
-        use libid_identity::handle_vectors::{
-            PLATFORM_GITHUB_DOMAIN,
-            PLATFORM_GOOGLE_DOMAIN,
-            PLATFORM_X_DOMAIN,
-        };
+        use libid_identity::platforms::PLATFORMS;
 
-        assert_eq!(profiles::X.platform, PLATFORM_X_DOMAIN);
-        assert_eq!(profiles::GITHUB.platform, PLATFORM_GITHUB_DOMAIN);
-        assert_eq!(profiles::GOOGLE.platform, PLATFORM_GOOGLE_DOMAIN);
+        let mut launch: Vec<&str> = profiles::LAUNCH.iter().map(|p| p.platform).collect();
+        let mut identity: Vec<&str> = PLATFORMS.iter().map(|p| p.key).collect();
+        launch.sort_unstable();
+        identity.sort_unstable();
+        assert_eq!(launch, identity);
     }
 
     #[test]
