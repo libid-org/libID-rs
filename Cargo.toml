@@ -11,7 +11,7 @@ resolver = "3"
 version = "0.6.0"
 edition = "2021"
 # The real floor, inherited from the original monorepo, and it is not arbitrary:
-#   * TLSNotary alpha.15's `mpz` graph declares Rust 1.95;
+#   * TLSNotary's `mpz` graph declares Rust 1.95;
 #   * the AWS SDK crates declare 1.94.1.
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -60,10 +60,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2"
 tiny-keccak = { version = "2.0", features = ["keccak"] }
-# Upstream TLSNotary, same pin as the original monorepo. A GIT dependency: any crate that
-# names it in its manifest cannot be published to crates.io (see
-# crates/libid-tlsn/Cargo.toml).
-tlsn = { git = "https://github.com/tlsnotary/tlsn", tag = "v0.1.0-alpha.15" }
+# TLSNotary main plus tlsnotary/tlsn#1200 (a proxy handshake fails when the
+# server closes), on libid-org/tlsn `integration/upstream-main`. A GIT
+# dependency: any crate that names it in its manifest cannot be published to
+# crates.io (see crates/libid-tlsn/Cargo.toml).
+tlsn = { git = "https://github.com/libid-org/tlsn", rev = "fa50b0d5ca6145a04fba167125c56c3631fe24ff" }
 tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "sync"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"

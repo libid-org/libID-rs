@@ -186,16 +186,13 @@ impl FromObserved<ObservedDirection<'_>> for DirectionBlock {
     /// second copy of this loop is a second place for the offset arithmetic to
     /// drift.
     fn from_observed(source: ObservedDirection<'_>) -> Result<Self, AttestError> {
-        let (authed, data) = match source.direction {
-            Direction::Sent => (
-                source.session.transcript.sent_authed(),
-                source.session.transcript.sent_unsafe(),
-            ),
-            Direction::Received => (
-                source.session.transcript.received_authed(),
-                source.session.transcript.received_unsafe(),
-            ),
+        let transcript = source.session.transcript;
+        let authed = match source.direction {
+            Direction::Sent => transcript.sent_authed(),
+            Direction::Received => transcript.received_authed(),
         };
+        // The revealed bytes, concatenated in the ascending order of `authed`.
+        let mut data = transcript.iter(source.direction);
 
         // One entry per revealed range, in ascending start order, each carrying
         // where it sat and what it held. Revealed bytes signed without their
@@ -209,7 +206,7 @@ impl FromObserved<ObservedDirection<'_>> for DirectionBlock {
             u32_of(range.end)?;
             revealed.push(RevealedRange {
                 start: u32_of(range.start)?,
-                bytes: data[range.clone()].to_vec(),
+                bytes: data.by_ref().take(range.len()).collect(),
             });
         }
 
@@ -389,6 +386,26 @@ mod tests {
         let (partial, commitments) = session();
         let data = AttestedData::from_observed(observed(&partial, &commitments)).unwrap();
         assert_tiles(&data.sent, data.sent_transcript_length);
+    }
+
+    #[test]
+    fn each_revealed_range_carries_its_own_bytes() {
+        // The bytes come off one stream across every revealed range of a
+        // direction, so a range that took too few or too many would shift the
+        // ranges after it.
+        let (partial, commitments) = session();
+        let data = AttestedData::from_observed(observed(&partial, &commitments)).unwrap();
+        assert_eq!(
+            data.sent.revealed.len(),
+            2,
+            "the fixture reveals around the bearer"
+        );
+        for (block, plaintext) in [(&data.sent, SENT), (&data.received, RECV)] {
+            for range in &block.revealed {
+                let start = range.start as usize;
+                assert_eq!(range.bytes, &plaintext[start..start + range.bytes.len()]);
+            }
+        }
     }
 
     /// The fixture's own offsets, which nothing else here reads.
