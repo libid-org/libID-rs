@@ -186,16 +186,13 @@ impl FromObserved<ObservedDirection<'_>> for DirectionBlock {
     /// second copy of this loop is a second place for the offset arithmetic to
     /// drift.
     fn from_observed(source: ObservedDirection<'_>) -> Result<Self, AttestError> {
-        let (authed, data) = match source.direction {
-            Direction::Sent => (
-                source.session.transcript.sent_authed(),
-                source.session.transcript.sent_unsafe(),
-            ),
-            Direction::Received => (
-                source.session.transcript.received_authed(),
-                source.session.transcript.received_unsafe(),
-            ),
+        let transcript = source.session.transcript;
+        let authed = match source.direction {
+            Direction::Sent => transcript.sent_authed(),
+            Direction::Received => transcript.received_authed(),
         };
+        // The revealed bytes, concatenated in the ascending order of `authed`.
+        let mut data = transcript.iter(source.direction);
 
         // One entry per revealed range, in ascending start order, each carrying
         // where it sat and what it held. Revealed bytes signed without their
@@ -209,7 +206,7 @@ impl FromObserved<ObservedDirection<'_>> for DirectionBlock {
             u32_of(range.end)?;
             revealed.push(RevealedRange {
                 start: u32_of(range.start)?,
-                bytes: data[range.clone()].to_vec(),
+                bytes: data.by_ref().take(range.len()).collect(),
             });
         }
 
