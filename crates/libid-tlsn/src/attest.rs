@@ -260,6 +260,9 @@ impl FromObserved<ObservedDirection<'_>> for DirectionBlock {
 
 #[cfg(test)]
 mod tests {
+    const X_TOKEN_SENT: &[u8] = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: 114\r\n\r\ngrant_type=authorization_code&client_id=abc&code=abc&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier=xyz";
+    const GITHUB_TOKEN_SENT: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\ncontent-type: application/x-www-form-urlencoded\r\ncontent-length: 109\r\n\r\nclient_id=Iv1.x&code=abc&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&code_verifier=xyz&client_secret=deadbeef";
+
     /// The Platform Verifier requires the revealed ranges and the commitments
     /// to account for the signed length exactly. That is its rule to enforce,
     /// not ours -- but a layout that cannot satisfy it produces attestations no
@@ -281,9 +284,12 @@ mod tests {
     }
 
     use super::*;
-    use libid_transcript::ceremony::{
-        profiles,
-        Layout,
+    use libid_transcript::{
+        attestation::HEADER_LEN,
+        ceremony::{
+            profiles,
+            Layout,
+        },
     };
     use rangeset::set::RangeSet;
     use tlsn::{
@@ -365,7 +371,7 @@ mod tests {
         // the client's. What stays checkable on this side is that every byte
         // the fields describe is present, which is the property the layout
         // gives the forward-parsing decoder something to walk.
-        let mut want = libid_transcript::attestation::HEADER_LEN;
+        let mut want = HEADER_LEN;
         for d in [&data.sent, &data.received] {
             want += 8 + 8; // one eight-byte count per list
             for r in &d.revealed {
@@ -553,10 +559,7 @@ mod tests {
                 .to_partial(sent_revealed.clone(), RangeSet::from(0..recv.len()));
             let data =
                 AttestedData::from_observed(observed(&partial, &commitments)).unwrap();
-            headers.push(
-                data.encode().unwrap()[..libid_transcript::attestation::HEADER_LEN]
-                    .to_vec(),
-            );
+            headers.push(data.encode().unwrap()[..HEADER_LEN].to_vec());
         }
         assert_eq!(
             headers[0], headers[1],
@@ -635,10 +638,10 @@ mod tests {
 
     #[test]
     fn the_x_token_session_layout_tiles() {
-        let sent: &[u8] = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\n\r\ngrant_type=authorization_code&client_id=abc&code_verifier=xyz";
+        let sent = X_TOKEN_SENT;
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"access_token\":\"SECRETBEARER\"}";
 
-        let s = Layout::token_request(sent);
+        let s = Layout::token_request(sent).unwrap();
         let r = Layout::token_response(recv).unwrap();
         let data = round_trip(sent, recv, &s, &r);
         assert_tiles(&data.sent, data.sent_transcript_length);
@@ -651,10 +654,10 @@ mod tests {
 
     #[test]
     fn the_github_exchange_layout_reveals_the_credential() {
-        let sent: &[u8] = b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\n\r\nclient_id=Iv1.x&code=abc&code_verifier=xyz&client_secret=deadbeef";
+        let sent = GITHUB_TOKEN_SENT;
         let recv: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n{\"access_token\":\"gho_SECRET\"}";
 
-        let s = Layout::token_request(sent);
+        let s = Layout::token_request(sent).unwrap();
         let r = Layout::token_response(recv).unwrap();
         let data = round_trip(sent, recv, &s, &r);
         assert_tiles(&data.sent, data.sent_transcript_length);

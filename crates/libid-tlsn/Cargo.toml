@@ -41,6 +41,9 @@ webpki-root-certs.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }
 # The attested-data tests build tlsn types directly.
 rangeset = "0.4"
+# The suites and the ceremony examples build token bodies and record digests.
+libid-transcript = { workspace = true, features = ["test-helpers"] }
+serde.workspace = true
 serde_json.workspace = true
 # The fixture generator (`examples/ceremony_fixtures.rs`) signs as a notary
 # does and derives the verifier the way the contracts do.

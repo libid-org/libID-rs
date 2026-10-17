@@ -19,6 +19,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 
+[features]
+# The token body a profile's verifier holds a request to, the record's digest
+# and its header length: what the suites and the fixture generators build.
+test-helpers = []
+
 [dev-dependencies]
 hex.workspace = true
 # The generated platform names, to check the profile table against.

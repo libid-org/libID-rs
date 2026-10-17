@@ -259,21 +259,6 @@ pub enum ProverStep {
     MpcProofFinalized,
 }
 
-impl ProverStep {
-    /// How far through the session this boundary is, in `(0, 1]`.
-    ///
-    /// The phases are not equal in wall-clock time -- setup and proving
-    /// dominate -- so this is a position, not an estimate of remaining time.
-    pub fn fraction(self) -> f32 {
-        match self {
-            Self::MpcSetupComplete => 0.25,
-            Self::TlsHandshakeComplete => 0.5,
-            Self::PlatformDataFetched => 0.75,
-            Self::MpcProofFinalized => 1.0,
-        }
-    }
-}
-
 /// The blinder that opens one commitment this session made.
 ///
 /// A committed range is a hash of the plaintext and this value, so the party
