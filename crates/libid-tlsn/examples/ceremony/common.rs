@@ -17,33 +17,28 @@ use sha2::Digest as _;
 /// anvil #0, the key the contract suites trust.
 pub const NOTARY_KEY: &str =
     "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-/// The suites' chain, domain, nonce and transaction data.
-pub const CHAIN_ID: u64 = 31337;
-pub const OPERATION_DOMAIN: &[u8] = b"libid.claim-identity";
+/// The suites' domain, nonce and transaction data.
+pub const OPERATION_DOMAIN: &[u8] = b"libid.bind-identity";
 pub const AUTHORIZATION_NONCE: [u8; 32] = [0x55; 32];
 pub const CEREMONY_VERSION: u16 = 1;
 /// The user agent the browser sends on GitHub's identity read.
 pub const BROWSER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
-/// `abi.encode(address(0xBEEF), uint256(0), address(0))`: the target
-/// `IdentityRegistry.bind` takes, with no service fee.
+/// `abi.encode(address(0xBEEF))`: the target `IdentityRegistry.bind` binds.
 pub fn transaction_data() -> Vec<u8> {
-    let mut data = vec![0u8; 96];
+    let mut data = vec![0u8; 32];
     data[30] = 0xBE;
     data[31] = 0xEF;
     data
 }
 
 /// The Authorization Digest of ceremony-common section 5, as
-/// `CeremonyAuthorization.digestFor` computes it on the test chain.
+/// `CeremonyAuthorization.digest` computes it on any chain.
 pub fn authorization_digest() -> [u8; 32] {
-    let mut chain = [0u8; 32];
-    chain[24..].copy_from_slice(&CHAIN_ID.to_be_bytes());
     let data = transaction_data();
-    let mut preimage = Vec::with_capacity(102 + data.len());
+    let mut preimage = Vec::with_capacity(70 + data.len());
     preimage.extend_from_slice(&keccak256(OPERATION_DOMAIN));
     preimage.extend_from_slice(&CEREMONY_VERSION.to_be_bytes());
-    preimage.extend_from_slice(&keccak256(&chain));
     preimage.extend_from_slice(&AUTHORIZATION_NONCE);
     preimage.extend_from_slice(&(data.len() as u32).to_be_bytes());
     preimage.extend_from_slice(&data);
@@ -91,7 +86,6 @@ pub fn hex0x(bytes: &[u8]) -> String {
 #[derive(Clone, Serialize)]
 pub struct Submission {
     pub ceremony_version: u16,
-    pub chain_id: u64,
     pub notary: String,
     pub operation_domain: String,
     pub authorization_nonce: String,
@@ -104,7 +98,6 @@ impl Submission {
     pub fn of(notary: &str) -> Self {
         Self {
             ceremony_version: CEREMONY_VERSION,
-            chain_id: CHAIN_ID,
             notary: notary.into(),
             operation_domain: hex0x(&keccak256(OPERATION_DOMAIN)),
             authorization_nonce: hex0x(&AUTHORIZATION_NONCE),
