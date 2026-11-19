@@ -19,7 +19,8 @@ record the libID on-chain verifiers check.
 
 `libid-tlsn` depends on `tlsn` from git, at the tlsnotary/tlsn release tag
 `v0.1.0-beta.1` (commit 40a0695); the TLSNotary project publishes no `tlsn`
-crate to crates.io, and cargo refuses to publish crates with git dependencies. Consume it as a git dependency:
+crate to crates.io, and cargo refuses to publish crates with git dependencies.
+Consume it as a git dependency:
 
 ```toml
 [dependencies]
