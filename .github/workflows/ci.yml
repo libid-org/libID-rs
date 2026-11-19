@@ -1,8 +1,8 @@
 name: CI
 
-# Four PR jobs (rust, dco, versions, publish-check) and two release-only jobs
-# (verify-tag, publish-crates). Job ids are stable on purpose: the release
-# jobs at the bottom hang their `needs:` off these names.
+# Five PR jobs (rust, dco, versions, tlsn-lock, publish-check) and two
+# release-only jobs (verify-tag, publish-crates). Job ids are stable on
+# purpose: the release jobs at the bottom hang their `needs:` off these names.
 #
 # Releases: publishing a GitHub Release tagged `v<version>` runs this same
 # workflow with the release event. rust/versions/publish-check run on every
@@ -77,10 +77,10 @@ jobs:
         run: cargo +"$NIGHTLY" fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Tests
-        run: cargo test --all
+        run: cargo test --locked --all
 
   # ---------------------------------------------------------------------------
   # DCO: every commit carries a Signed-off-by trailer, as CONTRIBUTING.md
@@ -171,6 +171,20 @@ jobs:
         run: ./.github/workflows/scripts/verify-tag.sh
 
   # ---------------------------------------------------------------------------
+  # The root manifest pins tlsn by tag, and a tag can move. The lock holds
+  # every tlsnotary/tlsn crate to the commit the tag named when it was pinned.
+  # ---------------------------------------------------------------------------
+  tlsn-lock:
+    name: tlsn lock commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Every tlsn crate resolves to v0.1.0-beta.1's commit
+        run: ./.github/workflows/scripts/tlsn-lock.sh 40a069565a2eaecbb5e691dbc634be20e8498daf
+
+  # ---------------------------------------------------------------------------
   # Publishability, checked on every PR: the four publishable crates dry-run
   # from a plain checkout. Cargo (>= 1.90) verifies interdependent packages
   # against a simulated registry, so unpublished intra-workspace versions
@@ -223,7 +237,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     if: github.event_name == 'release' && github.event.action == 'published'
-    needs: [verify-tag, versions, rust, publish-check]
+    needs: [verify-tag, versions, tlsn-lock, rust, publish-check]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
