@@ -24,7 +24,7 @@ Consume it as a git dependency:
 
 ```toml
 [dependencies]
-libid-tlsn = { git = "https://github.com/libid-org/libID-rs", tag = "v0.8.0" }
+libid-tlsn = { git = "https://github.com/libid-org/libID-rs", tag = "v0.9.0" }
 ```
 
 The crate split exists precisely so this caveat stays contained: everything
